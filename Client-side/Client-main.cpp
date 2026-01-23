@@ -1,5 +1,5 @@
 #include "client_header.hpp"
-#include "../../USEFULL-HEADERS/input.hpp"
+#include "../common/input.hpp"
 #include <algorithm>
 #include <unistd.h>
 #include <sys/select.h>
@@ -95,7 +95,6 @@ int main()
                 setup_stdin();
                 continue;
             }
-            
             // If we get here and weren't registered, we are now!
             if (!registered)
             {
