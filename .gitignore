@@ -5,3 +5,10 @@ build/
 # Old compiled files in source directories
 Client-side/client
 Server-side/server
+
+# CMake build directory
+build/
+
+# Old compiled files in source directories
+Client-side/client
+Server-side/server
