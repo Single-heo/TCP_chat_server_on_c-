@@ -126,7 +126,7 @@ void TcpServer::run()
 
                 clients[new_fd] = Client{
                     new_fd,
-                    "guest" + std::to_string(new_fd)
+                    ""  // username vazio inicialmente
                 };
 
 
