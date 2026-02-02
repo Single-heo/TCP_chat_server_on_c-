@@ -20,7 +20,7 @@ class TcpClient{
 private:
     int client_fd{};              // Socket file descriptor for client connection
     std::string client_ip;        // IP address of the client
-    int port{};                   // Port number for connection
+    int port;                   // Port number for connection
     std::string server_ip{};      // IP address of the server to connect to
     sockaddr_in address_of_server{};  // Server address structure for connection
     
@@ -39,9 +39,13 @@ public:
     std::string get_username();
     // Constructor: Initialize client with port and optional IP address
     TcpClient(int _port, const char* client_ip = "127.0.0.1");
-    
+    /*
+    - Verify and handle connection errors based on error code
+    -@param error_code Error code returned from connection attempt normally is errno
+    */
+    int verify_error_connection(int error_code);
     // Connect to a TCP server at the specified IPv4 address
-    void connect_to_server(const char* server_ipv4_address = "127.0.0.1");
+    int connect_to_server(const char* server_ipv4_address = "127.0.0.1");
     
     // Getter methods for client properties
     const char* getClientIp() const { return client_ip.c_str(); }
@@ -53,6 +57,59 @@ public:
         close(client_fd);
     }
 };
+inline int TcpClient::connect_to_server(const char* server_ipv4_address)
+{
+    // Store server IP for reference
+    server_ip = server_ipv4_address;
+    
+    // Validate IP address format
+    if (inet_addr(server_ipv4_address) == INADDR_NONE) {
+        std::cerr << "Invalid IP address: " << server_ipv4_address << std::endl;
+        close(client_fd);
+        return -1;
+    }
+    
+    // Configure server address structure
+    address_of_server.sin_family = AF_INET;
+    address_of_server.sin_addr.s_addr = inet_addr(server_ipv4_address);
+    address_of_server.sin_port = htons(port);
+    
+    // Attempt to connect to the server
+    if (connect(client_fd, (struct sockaddr*)&address_of_server, sizeof(address_of_server)) == -1) {
+        close(client_fd);
+        return verify_error_connection(errno);
+    }
+    
+    return 0; // Success
+}
+
+inline int TcpClient::verify_error_connection(int error_code)
+{
+    switch (error_code) {
+        case ECONNREFUSED:
+            std::cerr << "Connection refused by server at " << server_ip << ":" << port << std::endl;
+            break;
+            
+        case ETIMEDOUT:
+            std::cerr << "Connection to server at " << server_ip << ":" << port << " timed out." << std::endl;
+            break;
+            
+        case EHOSTUNREACH:
+            std::cerr << "No route to host " << server_ip << ":" << port << std::endl;
+            break;
+            
+        case ENETUNREACH:
+            std::cerr << "Network unreachable for " << server_ip << ":" << port << std::endl;
+            break;
+            
+        default:
+            std::cerr << "Failed to connect to " << server_ip << ":" << port 
+                      << " - Error: " << strerror(error_code) << std::endl;
+            break;
+    }
+    
+    return -1;
+}
 
 inline void TcpClient::register_user(int server_socket, registerType type)
 {
@@ -91,7 +148,7 @@ inline TcpClient::TcpClient(int _port, const char* client_ip)
  * @param server_ipv4_address IPv4 address of the server (default: localhost)
  * @throws std::runtime_error if connection fails
  */
-inline void TcpClient::connect_to_server(const char* server_ipv4_address)
+inline int TcpClient::connect_to_server(const char* server_ipv4_address)
 {
     // Store server IP for reference
     server_ip = server_ipv4_address;
@@ -105,8 +162,9 @@ inline void TcpClient::connect_to_server(const char* server_ipv4_address)
     if (connect(client_fd, (struct sockaddr*)&address_of_server, sizeof(address_of_server)) == -1) {
         // Connection failed - clean up socket and throw error
         close(client_fd);
-        throw std::runtime_error("Connection failed");
+        return verify_error_connection(errno);
     }
+    return 0; // No error occurred
 }
 
 inline std::string TcpClient::get_username()

@@ -25,9 +25,21 @@ std::string username{};
 static int original_stdin_flags;
 int main()
 {
+    bool try_again{true};
     int port = 25565;
+    std::string server_ip = getString("Enter server ip address: ", false, true, StringType::IPV4);
     TcpClient client(port, "127.0.0.1");
-    client.connect_to_server("127.0.0.1");
+    while (true)
+    {
+        int conn_result = client.connect_to_server(server_ip.c_str());
+        if (conn_result == 0)
+            break; // Connected successfully
+        else
+        {
+            std::cout << "Retrying connection in 5 seconds...\n";
+            sleep(5);
+        }
+    }
     int sockfd = client.getClientFd();
     
     // SAVE original terminal settings FIRST (before any modifications)
@@ -94,7 +106,7 @@ int main()
                 // Re-enable non-canonical mode for chat
                 setup_stdin();
                 continue;
-            }
+            }            
             // If we get here and weren't registered, we are now!
             if (!registered)
             {
@@ -177,6 +189,14 @@ void handle_stdin(int sockfd)
                     input_buffer.clear();
                     continue; 
                 }
+                if (bufferEndsWith(input_buffer.c_str(),input_buffer.size(),"/exit"))
+                {
+                    restore_stdin();
+                    std::cout << "\nExiting chat client.\n";
+                    close(sockfd);
+                    exit(0);
+                }
+                
                 // Send the accumulated input to the server
                 input_buffer += '\n';
                 send(sockfd, input_buffer.c_str(), input_buffer.size(), 0);
