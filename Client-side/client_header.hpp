@@ -148,24 +148,6 @@ inline TcpClient::TcpClient(int _port, const char* client_ip)
  * @param server_ipv4_address IPv4 address of the server (default: localhost)
  * @throws std::runtime_error if connection fails
  */
-inline int TcpClient::connect_to_server(const char* server_ipv4_address)
-{
-    // Store server IP for reference
-    server_ip = server_ipv4_address;
-    
-    // Configure server address structure
-    address_of_server.sin_family = AF_INET;  // IPv4 address family
-    address_of_server.sin_addr.s_addr = inet_addr(server_ipv4_address);  // Convert IP string to binary
-    address_of_server.sin_port = htons(port);  // Convert port to network byte order (big-endian)
-    
-    // Attempt to connect to the server
-    if (connect(client_fd, (struct sockaddr*)&address_of_server, sizeof(address_of_server)) == -1) {
-        // Connection failed - clean up socket and throw error
-        close(client_fd);
-        return verify_error_connection(errno);
-    }
-    return 0; // No error occurred
-}
 
 inline std::string TcpClient::get_username()
 {
