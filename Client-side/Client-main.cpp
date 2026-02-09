@@ -46,7 +46,8 @@ int main()
     tcgetattr(STDIN_FILENO, &old_term);
     
     // Get username FIRST, while stdin is still in normal mode
-    username = client.get_username();
+    std::cout << "Welcome to the chat client!\n";
+    username = client.register_username();
     
     // Send username to server
     std::string greeting = "/username " + username + "\n";
@@ -97,7 +98,7 @@ int main()
                 restore_stdin();
                 
                 std::cout << "[Error101] This username is already in use. Please try another.\n";
-                username = client.get_username();
+                username = client.register_username();
                 
                 // Send new username
                 std::string new_greeting = "/username " + username + "\n";

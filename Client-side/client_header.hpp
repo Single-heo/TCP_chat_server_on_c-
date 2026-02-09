@@ -36,7 +36,7 @@ public:
     - @param type he defines with is occurred a error when we was send the username 0 for normal or 1 if occurred a error and we are send again
     */
     void register_user(int server_socket, registerType type);
-    std::string get_username();
+    std::string register_username();
     // Constructor: Initialize client with port and optional IP address
     TcpClient(int _port, const char* client_ip = "127.0.0.1");
     /*
@@ -118,7 +118,7 @@ inline void TcpClient::register_user(int server_socket, registerType type)
         std::cout << "[Error101] This username is already in use\n";
     }
     
-    username = get_username();
+    username = register_username();
     std::string greeting = "/username " + username + "\n";
     send(server_socket, greeting.c_str(), greeting.size(),0);
 }
@@ -149,10 +149,10 @@ inline TcpClient::TcpClient(int _port, const char* client_ip)
  * @throws std::runtime_error if connection fails
  */
 
-inline std::string TcpClient::get_username()
+inline std::string TcpClient::register_username()
 {
+    bool IsRegistered = false;
     std::string name;
-    
     // Prompt for username
     std::cout << "Enter your username: ";
     std::cout.flush();
