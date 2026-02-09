@@ -1,196 +1,154 @@
-># TCP Chat Application
+# TCP Chat Server (C++) — epoll-based
 
-A multi-client TCP chat application written in C++ using socket programming and CMake build system.
+A multi-client TCP chat server written in **C++** using **Linux sockets** and **epoll** for scalable I/O multiplexing.
+This project is an evolution of a `select()`-based server, refactored to use **epoll** for better performance and cleaner event-driven design.
 
-## Features
+---
 
-- **Multi-client support** using `select()` for I/O multiplexing
-- **Username registration** with duplicate detection
-- **Real-time message broadcasting** to all connected clients
-- **Non-blocking terminal input** for smooth chat experience
-- **Proper terminal mode management** with automatic restoration
-- **CMake build system** for easy compilation
+## 🚀 Features
 
-## Requirements
+* Multi-client TCP chat server
+* Uses **epoll** (edge-trigger friendly structure)
+* Non-blocking sockets
+* Graceful handling of client disconnects
+* Username registration
+* Message broadcasting to all connected clients
+* Signal-safe (`SIGPIPE` ignored)
+* Designed for Linux
 
-- C++17 or later
-- CMake 3.10 or later
-- Linux/Unix system (uses POSIX sockets and termios)
-- GCC or Clang compiler
+---
 
-## Project Structure
+## 🧠 Why epoll instead of select?
+
+| select()                 | epoll()                      |
+| ------------------------ | ---------------------------- |
+| O(n) scan every call     | O(1) event notification      |
+| fd limit (FD_SETSIZE)    | Virtually unlimited          |
+| Copies fd sets each time | Kernel-managed interest list |
+| Poor scalability         | Excellent for many clients   |
+
+This makes `epoll` the **industry-standard** choice for high-performance servers.
+
+---
+
+## 🗂️ Project Structure
 
 ```
 .
-├── CMakeLists.txt              # CMake build configuration
-├── Client-side/
-│   ├── Client-main.cpp         # Client application entry point
-│   └── client_header.hpp       # Client class definitions
-├── Server-side/
-│   ├── Server_main.cpp         # Server application entry point
-│   ├── server-header.hpp       # Server class declarations
-│   └── server_header_definition.cpp  # Server class implementations
-├── common/
-│   └── input.hpp               # Shared input utility functions
+├── server.cpp
+├── server-header.hpp
+├── client.cpp
+├── USEFULL-HEADERS/
+│   ├── input.hpp
+│   └── terminal.hpp
+├── Makefile
 └── README.md
 ```
 
-## Building
+---
 
-### Using CMake (Recommended)
+## ⚙️ Build
+
+### Requirements
+
+* Linux (epoll is Linux-specific)
+* g++ (C++17 or newer)
+
+### Compile
 
 ```bash
-# Clone the repository
-git clone https://github.com/Single-heo/TCP_chat_server_on_c-.git
-cd TCP_chat_server_on_c-
-
-# Create build directory
-mkdir build
-cd build
-
-# Generate build files
-cmake ..
-
-# Compile
-make -j$(nproc)
-
-# Executables will be in the build directory:
-# - ./server
-# - ./client
+g++ -std=c++17 server.cpp -o server
+g++ -std=c++17 client.cpp -o client
 ```
 
-### Clean Rebuild
+Or simply:
 
 ```bash
-# From project root
-rm -rf build
-mkdir build
-cd build
-cmake ..
-make -j$(nproc)
+make
 ```
 
-### Build Types
+---
+
+## ▶️ Run
+
+### Start the server
 
 ```bash
-# Debug build (with debugging symbols)
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j$(nproc)
-
-# Release build (optimized)
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
-```
-
-### Manual Compilation (Alternative)
-
-```bash
-# Compile server
-g++ -o server Server-side/Server_main.cpp Server-side/server_header_definition.cpp -std=c++17 -I./common
-
-# Compile client
-g++ -o client Client-side/Client-main.cpp -std=c++17 -I./common
-```
-
-## Usage
-
-### Start the Server
-
-```bash
-# From the build directory
 ./server
 ```
 
-The server will start listening on `127.0.0.1:25565` by default.
-
-### Connect Clients
-
-Open additional terminals and run:
+### Start one or more clients
 
 ```bash
-# From the build directory
 ./client
 ```
 
-You'll be prompted to enter a username. Once connected, you can start chatting!
+Each client will be prompted for a username before joining the chat.
 
-### Chat Commands
+---
 
-- Type your message and press **Enter** to send
-- `/clear` - Clear the terminal screen
-- **Ctrl+C** - Disconnect and exit
+## 🧩 epoll Design Overview
 
-## Architecture
+### epoll lifecycle
 
-### Server Design
+1. Create epoll instance
+2. Register server socket
+3. Wait for events using `epoll_wait()`
+4. Accept new connections or read client data
+5. Broadcast messages
+6. Remove disconnected clients
 
-- Uses `select()` system call for I/O multiplexing to handle multiple clients simultaneously
-- Non-blocking socket I/O prevents server from freezing
-- Maintains a `std::unordered_map` of connected clients
-- Tracks usernames in a `std::unordered_set` to prevent duplicates
-- Broadcasts messages to all clients except the sender
+### Key syscalls used
 
-### Client Design
+* `epoll_create1()`
+* `epoll_ctl()`
+* `epoll_wait()`
+* `fcntl()` (non-blocking mode)
+* `accept()` / `recv()` / `send()`
 
-- Non-canonical terminal mode for character-by-character input
-- Non-blocking stdin allows simultaneous reading and writing
-- Properly saves and restores terminal settings on exit
-- Handles duplicate username errors with re-registration flow
+---
 
-### Protocol
+## 🔄 Event Flow
 
-- Username registration: `/username <name>\n`
-- Error codes: `101` - Duplicate username
-- Messages are broadcast with format: `username: message\n`
+* **Server socket ready** → Accept new client
+* **Client socket ready** → Read incoming message
+* **Client disconnects** → Remove fd from epoll + close socket
 
-## Technical Details
+---
 
-### Key Technologies
+## 🛡️ Safety & Stability
 
-- **POSIX Sockets** - TCP/IP communication
-- **select()** - I/O multiplexing for handling multiple connections
-- **termios** - Terminal I/O control for non-canonical mode
-- **fcntl()** - File descriptor flag manipulation for non-blocking I/O
+* `SIGPIPE` is ignored to prevent crashes on write to closed sockets
+* All sockets are non-blocking
+* epoll events are centrally managed
 
-### Thread Safety
+---
 
-Currently single-threaded using `select()` for multiplexing. All client operations are handled in the main server loop.
+## 🧪 Tested On
 
-## Development
+* Ubuntu / Debian-based distros
+* Kernel 5.x+
 
-### After Making Changes
+---
 
-```bash
-cd build
-make -j$(nproc)
-```
+## 📌 Notes
 
-CMake will automatically detect which files changed and recompile only what's necessary.
+* This is a learning-focused project meant to explore low-level networking
+* Not intended for production use without further hardening (TLS, auth, etc.)
 
-## Known Limitations
+---
 
-- Server binds to localhost only (127.0.0.1)
-- No message history or persistence
-- No encryption (messages sent in plain text)
-- Maximum 7 simultaneous clients (configurable in code)
+## 📜 License
 
-## Future Enhancements
+MIT License
 
-- [ ] Add SSL/TLS encryption
-- [ ] Implement private messaging
-- [ ] Add message history
-- [ ] Support for custom server IP and port
-- [ ] Add logging system
-- [ ] Implement chat rooms/channels
+---
 
-## Contributing
+## 👤 Author
 
-Feel free to open issues or submit pull requests!
+Single-heo
+Refactor to epoll-based architecture
 
-## License
+---
 
-This project is open source and available for educational purposes.
-
-## Author
-
-Created as a learning project for network programming and socket APIs in C++
+If you want a **threaded version**, **edge-triggered epoll**, or **epoll + thread pool**, feel free to extend this project 🚀
