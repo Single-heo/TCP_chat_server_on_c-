@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <string>
 
+
 // Maximum size for network data buffer
 #define BUFFER_SIZE 1024
 #define DUPLICATED_USERNAME_ERROR "101"
@@ -39,6 +40,7 @@ public:
     void remove_from_epoll(int fd);
     void handle_new_connection();
     void Shutting_down();
+    void save_credentials(const char* username, const char* password);
     void run();
     ~TcpServer();
     

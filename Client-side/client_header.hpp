@@ -107,6 +107,7 @@ inline int TcpClient::connect_to_server(const char* server_ipv4_address)
         return verify_error_connection(errno);
     }
     
+    
     return 0; // Success
 }
 

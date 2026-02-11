@@ -207,6 +207,11 @@ void TcpServer::Shutting_down()
     SERVER_IS_RUNNING = false;
 }
 
+void TcpServer::save_credentials(const char *username, const char *password)
+{
+    
+}
+
 /**
  * Main server loop - the heart of the server
  * 
