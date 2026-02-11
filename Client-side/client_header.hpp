@@ -5,15 +5,36 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <string>
+#include <algorithm>
 
 // Define buffer size for network communication
 #define BUFFER_SIZE 1024
 #define Logging_username true
 
-enum class registerType
-{
-    Normal,
-    Error_101,
+// Utility function to trim whitespace from string
+inline void trim(std::string& str) {
+    str.erase(0, str.find_first_not_of(" \t\n\r"));
+    str.erase(str.find_last_not_of(" \t\n\r") + 1);
+}
+
+// Utility function to validate credentials
+inline bool validate_credentials(const std::string& username, const std::string& password, AuthMode mode) {
+    return !username.empty() && !password.empty() && username.length() <= 50 && password.length() <= 8;
+}
+
+enum class Errortype{
+    Error_101
+};
+
+enum class AuthMode {
+    REGISTER,  // New user registration
+    LOGIN      // Existing user login
+};
+
+struct UserCredentials {
+    std::string username;
+    std::string password;
+    bool valid;
 };
 
 class TcpClient{
@@ -25,6 +46,12 @@ private:
     sockaddr_in address_of_server{};  // Server address structure for connection
     
 public:
+    /*
+    - Get user credentials (username and password) from standard input
+    - @param mode Determines if we are registering a new user or logging in an existing user
+    - @return UserCredentials struct containing username, password, and validity flag
+    */
+    UserCredentials get_user_credentials(AuthMode mode);
     // Username for chat identification (default prefix for commands)
     std::string username{"/username "};
     
@@ -35,7 +62,7 @@ public:
     - @param server_socket need to send to the server
     - @param type he defines with is occurred a error when we was send the username 0 for normal or 1 if occurred a error and we are send again
     */
-    void register_user(int server_socket, registerType type);
+    void register_user(int server_socket, Errortype type);
     std::string register_username();
     // Constructor: Initialize client with port and optional IP address
     TcpClient(int _port, const char* client_ip = "127.0.0.1");
@@ -111,9 +138,44 @@ inline int TcpClient::verify_error_connection(int error_code)
     return -1;
 }
 
-inline void TcpClient::register_user(int server_socket, registerType type)
+inline UserCredentials TcpClient::get_user_credentials(AuthMode mode)
 {
-    if (type == registerType::Error_101)
+    UserCredentials creds;
+    creds.valid = false;
+    
+    // Show appropriate prompt based on mode
+    if (mode == AuthMode::REGISTER) {
+        std::cout << "=== User Registration ===\n";
+    } else {
+        std::cout << "=== User Login ===\n";
+    }
+    
+    // Get username
+    std::cout << "Enter username: ";
+    std::cout.flush();
+    std::getline(std::cin, creds.username);
+    
+    // Get password
+    std::cout << "Enter password: ";
+    std::cout.flush();
+    std::getline(std::cin, creds.password);
+    
+    // Validate
+    if (!validate_credentials(creds.username, creds.password, mode)) {
+        return creds;  // valid = false
+    }
+    
+    // Clean whitespace
+    trim(creds.username);
+    trim(creds.password);
+    
+    creds.valid = true;
+    return creds;
+}
+
+inline void TcpClient::register_user(int server_socket, Errortype type)
+{
+    if (type == Errortype::Error_101)
     {
         std::cout << "[Error101] This username is already in use\n";
     }
@@ -153,6 +215,7 @@ inline std::string TcpClient::register_username()
 {
     bool IsRegistered = false;
     std::string name;
+    std::string passwd;
     // Prompt for username
     std::cout << "Enter your username: ";
     std::cout.flush();
@@ -160,22 +223,39 @@ inline std::string TcpClient::register_username()
     // Read username using standard input (canonical mode)
     // This happens before setup_stdin() is called, so input is line-buffered
     std::getline(std::cin, name);
+
+    std::cout << "Enter your password: ";
+    std::cout.flush();
+    std::getline(std::cin, passwd);
     
     // Validate username - ensure it's not empty and has reasonable length
-    while (name.empty() || name.length() > 50)
+    while (passwd.empty() || name.empty() || name.length() > 50 || passwd.length() > 8)
     {
-        if (name.empty())
+        if (name.empty()){
             std::cout << "Username cannot be empty. Please try again: ";
-        else
+            std::cout.flush();
+            std::getline(std::cin, name);
+        }
+        else if (name.length() > 50){
             std::cout << "Username too long (max 50 chars). Please try again: ";
-        
-        std::cout.flush();
-        std::getline(std::cin, name);
+        }
+        else if (passwd.empty()){
+            std::cout << "Password cannot be empty. Please try again: ";
+            std::cout.flush();
+            std::getline(std::cin, passwd);
+        }
+        else if (passwd.length() > 8){
+            std::cout << "Password too long (max 8 chars). Please try again: ";
+            std::cout.flush();
+            std::getline(std::cin, passwd);
+        }    
     }
     
     // Remove any leading/trailing whitespace
     name.erase(0, name.find_first_not_of(" \t\n\r"));
     name.erase(name.find_last_not_of(" \t\n\r") + 1);
+    passwd.erase(0, passwd.find_first_not_of(" \t\n\r"));
+    passwd.erase(passwd.find_last_not_of(" \t\n\r") + 1);
     
-    return name;
+    return name + " | " + passwd;
 }

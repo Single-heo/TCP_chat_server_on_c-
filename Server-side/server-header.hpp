@@ -46,10 +46,12 @@ public:
     int getPort() const { return port; }
     
     struct Client {
-        int fd;
-        std::string username;
-        std::string read_buffer;   // Accumulates partial messages
-        std::string write_buffer;  // Data waiting to be sent
+        int fd{};
+        std::string username{};
+        std::string password{};
+        std::string read_buffer{};   // Accumulates partial messages
+        std::string write_buffer{};  // Data waiting to be sent
+        bool registered{};          // Has the client completed username registration?
     };
     
     std::unordered_set<std::string> usernames;
