@@ -5,6 +5,8 @@
 #include <cctype>
 #include <cstring>
 
+#pragma once
+
 // ============================================================================
 // INPUT BUFFER MANAGEMENT
 // ============================================================================
@@ -704,6 +706,55 @@ inline bool parse_username(const char* buffer, char* out_name, size_t out_size)
     out_name[out_size - 1] = '\0'; // Ensure null termination
     
     return true;
+}
+
+struct temp_user_credentials {
+    std::string username;
+    std::string password;
+    int cmd_type{0}; // 1 = login, 2 = register
+};
+
+/**
+ * Parse authentication commands:
+ *   /register username|password
+ *   /login username|password
+ * 
+ * @return true if buffer matched a valid auth command
+ */
+inline bool parse_credentials(const char* buffer, temp_user_credentials& out)
+{
+    std::string input(buffer);
+
+    // Determine command type
+    if (input.rfind("/register ", 0) == 0) {
+        out.cmd_type = 2; // register
+        input = input.substr(10); // len of "/register "
+    } else if (input.rfind("/login ", 0) == 0) {
+        out.cmd_type = 1; // login
+        input = input.substr(7); // len of "/login "
+    } else {
+        return false;
+    }
+
+    // Find delimiter '|'
+    size_t delim = input.find('|');
+    if (delim == std::string::npos || delim == 0 || delim == input.size() - 1) {
+        return false;
+    }
+
+    out.username = input.substr(0, delim);
+    out.password = input.substr(delim + 1);
+
+    // Trim whitespace
+    auto trim = [](std::string& s) {
+        s.erase(0, s.find_first_not_of(" \t\r\n"));
+        s.erase(s.find_last_not_of(" \t\r\n") + 1);
+    };
+
+    trim(out.username);
+    trim(out.password);
+
+    return !out.username.empty() && !out.password.empty();
 }
 
 // ============================================================================
