@@ -1,33 +1,35 @@
 # TCP Chat Server (C++) — epoll-based
 
-A multi-client TCP chat server written in **C++** using **Linux sockets** and **epoll** for scalable I/O multiplexing.
-This project is an evolution of a `select()`-based server, refactored to use **epoll** for better performance and cleaner event-driven design.
+A multi-client TCP chat server written in **C++** using **Linux sockets** and **epoll** for scalable I/O multiplexing. The project is organized into modular components covering the server, client, database layer, and shared utilities — all built with **CMake**.
 
 ---
 
 ## 🚀 Features
 
-* Multi-client TCP chat server
-* Uses **epoll** (edge-trigger friendly structure)
-* Non-blocking sockets
-* Graceful handling of client disconnects
-* Username registration
-* Message broadcasting to all connected clients
-* Signal-safe (`SIGPIPE` ignored)
-* Designed for Linux
+- Multi-client TCP chat server
+- Uses **epoll** for event-driven I/O
+- Non-blocking sockets
+- Graceful handling of client disconnects
+- Username registration
+- Message broadcasting to all connected clients
+- Signal-safe (`SIGPIPE` ignored)
+- **Database layer** for persistent storage
+- Modular architecture with shared `common/` utilities
+- CMake-based build system
+- Designed for Linux
 
 ---
 
 ## 🧠 Why epoll instead of select?
 
-| select()                 | epoll()                      |
-| ------------------------ | ---------------------------- |
-| O(n) scan every call     | O(1) event notification      |
-| fd limit (FD_SETSIZE)    | Virtually unlimited          |
+| `select()` | `epoll()` |
+|---|---|
+| O(n) scan every call | O(1) event notification |
+| fd limit (`FD_SETSIZE`) | Virtually unlimited |
 | Copies fd sets each time | Kernel-managed interest list |
-| Poor scalability         | Excellent for many clients   |
+| Poor scalability | Excellent for many clients |
 
-This makes `epoll` the **industry-standard** choice for high-performance servers.
+`epoll` is the **industry-standard** choice for high-performance Linux servers.
 
 ---
 
@@ -35,13 +37,12 @@ This makes `epoll` the **industry-standard** choice for high-performance servers
 
 ```
 .
-├── server.cpp
-├── server-header.hpp
-├── client.cpp
-├── USEFULL-HEADERS/
-│   ├── input.hpp
-│   └── terminal.hpp
-├── Makefile
+├── Server-side/          # Server source code
+├── Client-side/          # Client source code
+├── DataBase/             # Database integration layer
+├── common/               # Shared headers and utilities
+├── CMakeLists.txt        # CMake build configuration
+├── .gitignore
 └── README.md
 ```
 
@@ -51,21 +52,19 @@ This makes `epoll` the **industry-standard** choice for high-performance servers
 
 ### Requirements
 
-* Linux (epoll is Linux-specific)
-* g++ (C++17 or newer)
+- Linux (epoll is Linux-specific)
+- g++ (C++17 or newer)
+- CMake 3.x+
 
-### Compile
-
-```bash
-g++ -std=c++17 server.cpp -o server
-g++ -std=c++17 client.cpp -o client
-```
-
-Or simply:
+### Compile with CMake
 
 ```bash
+mkdir build && cd build
+cmake ..
 make
 ```
+
+Binaries will be placed in the `build/` directory after compilation.
 
 ---
 
@@ -95,46 +94,53 @@ Each client will be prompted for a username before joining the chat.
 2. Register server socket
 3. Wait for events using `epoll_wait()`
 4. Accept new connections or read client data
-5. Broadcast messages
+5. Broadcast messages to all connected clients
 6. Remove disconnected clients
 
 ### Key syscalls used
 
-* `epoll_create1()`
-* `epoll_ctl()`
-* `epoll_wait()`
-* `fcntl()` (non-blocking mode)
-* `accept()` / `recv()` / `send()`
+- `epoll_create1()`
+- `epoll_ctl()`
+- `epoll_wait()`
+- `fcntl()` (non-blocking mode)
+- `accept()` / `recv()` / `send()`
 
 ---
 
 ## 🔄 Event Flow
 
-* **Server socket ready** → Accept new client
-* **Client socket ready** → Read incoming message
-* **Client disconnects** → Remove fd from epoll + close socket
+- **Server socket ready** → Accept new client
+- **Client socket ready** → Read incoming message
+- **Client disconnects** → Remove fd from epoll + close socket
+
+---
+
+## 🗄️ Database Layer
+
+The `DataBase/` module handles persistent storage. This includes storing user data or chat history. It is decoupled from the server logic through the shared `common/` interface, keeping the architecture clean and extensible.
 
 ---
 
 ## 🛡️ Safety & Stability
 
-* `SIGPIPE` is ignored to prevent crashes on write to closed sockets
-* All sockets are non-blocking
-* epoll events are centrally managed
+- `SIGPIPE` is ignored to prevent crashes on writes to closed sockets
+- All sockets are set to non-blocking mode
+- epoll events are centrally managed
+- Modular design separates concerns across server, client, and database layers
 
 ---
 
 ## 🧪 Tested On
 
-* Ubuntu / Debian-based distros
-* Kernel 5.x+
+- Ubuntu / Debian-based distros
+- Kernel 5.x+
 
 ---
 
 ## 📌 Notes
 
-* This is a learning-focused project meant to explore low-level networking
-* Not intended for production use without further hardening (TLS, auth, etc.)
+- This is a learning-focused project exploring low-level networking and system design in C++
+- Not intended for production use without further hardening (TLS, authentication, etc.)
 
 ---
 
@@ -146,9 +152,7 @@ MIT License
 
 ## 👤 Author
 
-Single-heo
-Refactor to epoll-based architecture
+**Single-heo**
+Refactored to epoll-based architecture with modular CMake project structure.
 
 ---
-
-If you want a **threaded version**, **edge-triggered epoll**, or **epoll + thread pool**, feel free to extend this project 🚀
