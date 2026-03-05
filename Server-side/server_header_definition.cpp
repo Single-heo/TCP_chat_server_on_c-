@@ -1,446 +1,368 @@
 #include "server-header.hpp"
-#include "../../USEFULL-HEADERS/input.hpp"
+#include <fstream>  // std::ifstream, std::ofstream for JSON file I/O
 
-/**
- * Constructor: Initializes the TCP server and sets up the listening socket
- * 
- * @param _port Port number to bind the server to (e.g., 25565)
- * @param ipv4_address IP address to bind to (default: "127.0.0.1" for localhost)
- * 
- * Steps:
- * 1. Ignore SIGPIPE signal (prevents server crash when client disconnects)
- * 2. Create TCP socket
- * 3. Set socket options (SO_REUSEADDR allows quick restart)
- * 4. Bind socket to IP:port
- * 5. Start listening for connections
- */
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 TcpServer::TcpServer(int _port, const char* ipv4_address)
 {
-    // Ignore SIGPIPE to prevent server crash when writing to closed sockets
-    // Without this, writing to a disconnected client would terminate the server
+    // Ignore SIGPIPE so that send() to a closed socket returns -1 instead of
+    // crashing the process with a signal
     signal(SIGPIPE, SIG_IGN);
-    
+
     std::cout << "Starting TCP server on " << ipv4_address << ":" << _port << "...\n";
     port = _port;
-    
-    // Create a TCP socket (SOCK_STREAM = TCP, AF_INET = IPv4)
-    // Returns a file descriptor that represents this socket
+
+    // AF_INET = IPv4 | SOCK_STREAM = TCP | protocol 0 = auto-select
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
         std::cerr << "Socket creation error" << std::endl;
         throw std::runtime_error("Socket creation failed");
     }
-    
-    // Enable SO_REUSEADDR option:
-    // Allows the server to bind to a port that was recently used
-    // Without this, you'd get "Address already in use" error when restarting quickly
+
+    // SO_REUSEADDR: allows re-binding to a port in TIME_WAIT state immediately
+    // after server restart — avoids "Address already in use" errors
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         std::cerr << "setsockopt(SO_REUSEADDR) failed" << std::endl;
     }
-    
+
     // Configure the server address structure
-    sockaddr_in address;
-    address.sin_family = AF_INET;                       // IPv4 protocol
-    address.sin_addr.s_addr = inet_addr(ipv4_address);  // Convert IP string to binary
-    address.sin_port = htons(port);                     // Convert port to network byte order (big-endian)
-    
-    // Bind the socket to the specified IP address and port
-    // This associates the socket with a specific network interface and port number
-    if(bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1) {
+    sockaddr_in address{};
+    address.sin_family      = AF_INET;
+    address.sin_addr.s_addr = inet_addr(ipv4_address); // convert dotted-decimal to binary
+    address.sin_port        = htons(port);              // host byte order -> network byte order
+
+    // Bind the socket to the address/port
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == -1) {
         std::cerr << "Bind error: " << strerror(errno) << std::endl;
         close(server_fd);
         throw std::runtime_error("Bind failed");
     }
-    
-    // Start listening for incoming connections
-    // The '3' is the backlog queue size - max number of pending connections
-    if(listen(server_fd, 3) == -1) {
+
+    // Start listening; backlog of 3 means up to 3 connections can queue
+    // before accept() is called
+    if (listen(server_fd, 3) == -1) {
         std::cerr << "Listen failed" << std::endl;
         close(server_fd);
         throw std::runtime_error("Listen failed");
     }
-    
+
     std::cout << "Server is listening on " << ipv4_address << ":" << port << std::endl;
 }
 
-/**
- * Initialize the epoll instance and add the server socket to it
- * 
- * epoll is a scalable I/O event notification mechanism (better than select/poll)
- * It allows monitoring multiple file descriptors efficiently
- * 
- * Steps:
- * 1. Create epoll instance with epoll_create1()
- * 2. Configure event structure for server socket
- * 3. Add server socket to epoll (monitor for incoming connections)
- */
+// ---------------------------------------------------------------------------
+// Epoll setup
+// ---------------------------------------------------------------------------
 void TcpServer::initialize_epoll()
 {
-    // Create an epoll instance
-    // The '0' flag means use default settings
-    // Returns a file descriptor representing the epoll instance
+    // epoll_create1(0): creates epoll instance; flag 0 = default (no CLOEXEC here)
     epoll_fd = epoll_create1(0);
     if (epoll_fd == -1) {
         perror("epoll_create1");
-        exit(EXIT_FAILURE);
+        throw std::runtime_error("epoll_create1 failed");
     }
-    
-    // Configure the epoll event structure for the server socket
-    struct epoll_event ev;
-    ev.events = EPOLLIN;      // EPOLLIN = monitor for readable data (incoming connections)
-    ev.data.fd = server_fd;   // Store the server socket fd in the event data
-                              // This allows us to identify which fd triggered when epoll_wait returns
-    
-    // Add the server socket to the epoll instance
-    // EPOLL_CTL_ADD = add a new file descriptor to monitor
-    // Now epoll will notify us when new connections arrive on server_fd
+
+    // Register the server socket for EPOLLIN (incoming connection events)
+    struct epoll_event ev{};
+    ev.events  = EPOLLIN;
+    ev.data.fd = server_fd;
+
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) == -1) {
         perror("epoll_ctl: server_fd");
-        exit(EXIT_FAILURE);
+        throw std::runtime_error("epoll_ctl failed");
     }
-    
+
     std::cout << "Epoll initialized successfully\n";
 }
 
-/**
- * Add a file descriptor to the epoll instance for monitoring
- * 
- * @param fd The file descriptor to monitor (usually a client socket)
- * @param events Bitmask of events to monitor (EPOLLIN, EPOLLOUT, etc.)
- * 
- * Common events:
- * - EPOLLIN: Data available to read (incoming messages)
- * - EPOLLOUT: Socket ready for writing (can send data)
- * - EPOLLERR: Error condition
- * - EPOLLHUP: Hang up (connection closed)
- */
+// ---------------------------------------------------------------------------
+// Epoll helpers
+// ---------------------------------------------------------------------------
+
+// Registers fd with the given event mask (e.g. EPOLLIN, EPOLLIN|EPOLLOUT)
 void TcpServer::add_to_epoll(int fd, uint32_t events)
 {
-    // Create a temporary event structure on the stack
-    // This is safe because epoll_ctl copies the data internally
-    struct epoll_event ev;
-    ev.events = events;    // What events to monitor (e.g., EPOLLIN for reading)
-    ev.data.fd = fd;       // Store the fd so we know which socket triggered
-    
-    // Add this fd to the epoll instance
-    // After this call, epoll will notify us when the specified events occur on this fd
+    struct epoll_event ev{};
+    ev.events  = events;
+    ev.data.fd = fd;
+
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
         perror("epoll_ctl: add");
     }
 }
 
-/**
- * Remove a file descriptor from epoll monitoring
- * 
- * @param fd The file descriptor to stop monitoring
- * 
- * Important: The event parameter is IGNORED for EPOLL_CTL_DEL operations
- * The kernel uses the fd as the unique identifier, not the event struct
- * Each fd can only be registered once in an epoll instance
- */
+// Removes fd from epoll; passing nullptr as event is valid since Linux 2.6.9
 void TcpServer::remove_from_epoll(int fd)
 {
-    // EPOLL_CTL_DEL = remove a file descriptor from epoll monitoring
-    // The last parameter (event) is ignored for DEL operations, so we pass nullptr
-    // The kernel identifies which entry to remove based solely on the fd
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == -1) {
         perror("epoll_ctl: del");
     }
 }
 
-/**
- * Handle a new incoming client connection
- * 
- * Called when epoll notifies us that the server socket has data ready (EPOLLIN)
- * This means a client is trying to connect
- * 
- * Steps:
- * 1. Accept the connection (creates a new socket for this client)
- * 2. Add the new client socket to epoll monitoring
- * 3. Create a Client entry in our clients map
- */
+// ---------------------------------------------------------------------------
+// New connection handler
+// ---------------------------------------------------------------------------
 void TcpServer::handle_new_connection()
 {
-    // Prepare structure to receive client address information
     sockaddr_in client_addr{};
-    socklen_t len = sizeof(client_addr);
-    
-    // Accept the pending connection
-    // This creates a NEW socket (new_fd) specifically for this client
-    // The server_fd continues listening for other connections
-    // client_addr will be filled with the client's IP and port
-    int new_fd = accept(server_fd, (sockaddr *)&client_addr, &len);
+    socklen_t   len = sizeof(client_addr);
+
+    // accept() extracts the first queued connection and returns a new fd for it
+    int new_fd = accept(server_fd, (sockaddr*)&client_addr, &len);
     if (new_fd < 0) {
         perror("accept");
-        return;  // Connection failed, but server continues running
+        return;
     }
-    
-    // Optional: Make socket non-blocking for edge-triggered epoll (EPOLLET)
-    // Non-blocking means recv/send won't wait if no data is available
-    // Commented out because we're using level-triggered mode (default)
-    // int flags = fcntl(new_fd, F_GETFL, 0);
-    // fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
-    
-    // Add the new client socket to epoll monitoring
-    // EPOLLIN = notify us when this client sends data
+
+    // Enforce the MAX_CLIENTS cap: send an error and close immediately
+    // so the connecting client gets a clear rejection message
+    if (static_cast<int>(clients.size()) >= MAX_CLIENTS) {
+        const char* msg = "Error: server is full\n";
+        send(new_fd, msg, strlen(msg), 0);
+        close(new_fd);
+        return;
+    }
+
+    // Register the new fd for read events and add to the client map
     add_to_epoll(new_fd, EPOLLIN);
-    
-    // Create a Client struct to track this client's state
-    // fd: the socket file descriptor
-    // username: empty initially, set when client registers
-    // client_buffer: unused in current implementation
-    // write_buffer: accumulates partial messages until we receive a newline
-    clients[new_fd] = Client{new_fd, "", "", ""};
-    
+
+    clients[new_fd].fd           = new_fd;
+    clients[new_fd].username     = "";   // username is empty until /register or /login
+    clients[new_fd].write_buffer = "";
+
     std::cout << "Client connected fd=" << new_fd << std::endl;
 }
 
-/**
- * Gracefully stop the server
- * 
- * Sets the flag that controls the main loop in run()
- * The server will finish processing current events and then exit cleanly
- */
+// ---------------------------------------------------------------------------
+// Graceful shutdown trigger
+// ---------------------------------------------------------------------------
 void TcpServer::Shutting_down()
 {
+    // Setting this flag causes the run() while-loop to exit on the next iteration
     SERVER_IS_RUNNING = false;
 }
 
-/**
- * Main server loop - the heart of the server
- * 
- * This function runs continuously, monitoring all sockets using epoll
- * and handling events as they occur:
- * - New connections on server_fd
- * - Incoming messages from clients
- * - Client disconnections
- * 
- * epoll_wait() blocks until at least one event occurs or timeout expires
- */
+// ---------------------------------------------------------------------------
+// Credential persistence
+// ---------------------------------------------------------------------------
+void TcpServer::save_credentials(const std::string& username, const std::string& password)
+{
+    using json = nlohmann::json;
+    json data;
+
+    // Attempt to read the existing credentials file
+    std::ifstream infile("../DataBase/credentials.json");
+
+    if (infile.is_open()) {
+        try {
+            infile >> data;  // deserialize JSON from file
+        } catch (json::parse_error& e) {
+            // File is corrupt or empty — start fresh
+            std::cerr << "JSON parse error: " << e.what() << std::endl;
+            data["users"] = json::array();
+        }
+        infile.close();
+    } else {
+        // File doesn't exist yet — initialize structure
+        data["users"] = json::array();
+    }
+
+    // Safety check: ensure "users" key exists and is an array,
+    // even if the JSON had unexpected structure
+    if (!data.contains("users") || !data["users"].is_array()) {
+        data["users"] = json::array();
+    }
+
+    // Build the new user entry
+    json user;
+    user["username"]   = username;
+    user["password"]   = password;             // TODO: hash before storing (e.g. bcrypt)
+    user["created_at"] = "2025-02-26";         // TODO: replace with real timestamp via <chrono>
+
+    data["users"].push_back(user);
+
+    // Write back the updated JSON (pretty-printed with indent=4)
+    std::ofstream outfile("../DataBase/credentials.json");
+    if (outfile.is_open()) {
+        outfile << data.dump(4);
+        outfile.close();
+        std::cout << "Credentials saved for user: " << username << std::endl;
+    } else {
+        std::cerr << "Failed to open credentials file for writing" << std::endl;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main event loop
+// ---------------------------------------------------------------------------
 void TcpServer::run()
 {
-    // Set up epoll and add server socket to monitoring
     initialize_epoll();
-    
-    // Array to receive events from epoll_wait()
-    // epoll_wait() fills this array with ready file descriptors
-    // MAX_EVENTS (10) is the maximum number of events we can process per iteration
-    struct epoll_event events[MAX_EVENTS];
-    
+
+    struct epoll_event events[MAX_EVENTS]; // buffer for events returned by epoll_wait
+
     std::cout << "Server running with epoll...\n";
 
-    // Main event loop - runs until Shutting_down() is called
     while (SERVER_IS_RUNNING)
     {
-        // Wait for events on any monitored file descriptor
-        // Parameters:
-        // - epoll_fd: our epoll instance
-        // - events: array to fill with ready file descriptors
-        // - MAX_EVENTS: maximum number of events to return
-        // - 1000: timeout in milliseconds (1 second)
-        //
-        // Returns: number of ready file descriptors (nfds)
-        // The events array is filled with nfds entries
+        // Block for up to 1000 ms waiting for any registered fd to become ready.
+        // Timeout allows the loop to re-check SERVER_IS_RUNNING periodically.
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
-        
-        // Error handling
+
         if (nfds < 0) {
-            // EINTR = interrupted by signal (e.g., Ctrl+C) - not a real error
-            if (errno == EINTR)
-                continue;  // Try again
+            if (errno == EINTR) continue; // interrupted by signal — just retry
             std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
-            break;  // Fatal error, exit loop
+            break;
         }
-        
-        // Timeout occurred (no events in 1 second)
-        // This allows us to check SERVER_IS_RUNNING periodically
-        if (nfds == 0)
-            continue;  // Go back to epoll_wait
-        
-        // Process all ready file descriptors returned by epoll_wait
-        // nfds tells us how many events occurred
+
+        if (nfds == 0) continue; // timeout with no events — loop back
+
         for (int i = 0; i < nfds; i++)
         {
-            // Extract the file descriptor that has data ready
-            // We stored this in ev.data.fd when we added it to epoll
             int fd = events[i].data.fd;
-            
-            // Case 1: Activity on server socket = new connection request
+
+            // ── New incoming connection ──────────────────────────────────────
             if (fd == server_fd) {
                 handle_new_connection();
-                continue;  // Move to next event
+                continue;
             }
-            
-            // Case 2: Activity on client socket = incoming data from client
-            
-            // Clear buffer before receiving new data
-            memset(buffer, 0, BUFFER_SIZE);
-            
-            // Receive data from the client
-            // Parameters:
-            // - fd: client socket
-            // - buffer: where to store received data
-            // - BUFFER_SIZE - 1: max bytes to read (leave room for null terminator)
-            // - 0: flags (none)
-            //
-            // Returns: number of bytes received (n)
+
+            // ── Data from an existing client ────────────────────────────────
+            memset(buffer, 0, BUFFER_SIZE); // clear stale data before reading
+
+            // Read up to BUFFER_SIZE-1 bytes (leave room for null terminator)
             ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
-            
-            // Handle disconnection or error
+
             if (n <= 0) {
+                // n == 0: client closed connection gracefully
+                // n <  0: socket error
                 if (n == 0)
-                    std::cout << "Client disconnected fd=" << fd << std::endl;  // Graceful close
+                    std::cout << "Client disconnected fd=" << fd << std::endl;
                 else
-                    perror("recv");  // Error occurred
-                
+                    perror("recv");
+
                 disconnect_client(fd);
-                continue;  // Move to next event
+                continue;
             }
-            
-            // Check if message has a newline (complete message)
-            // Messages are delimited by '\n' in this protocol
+
+            // Detect whether the received data ends with a newline
+            // (used to decide if the message is complete)
             bool has_newline = bufferEndsWith(buffer, n, "\n");
-            
-            // Clean up the buffer (remove trailing whitespace, newlines, etc.)
+
+            // Strip leading/trailing whitespace from the raw buffer
             n = trimBuffer(buffer, n);
-            
-            // Ignore empty messages
-            if (isBufferEmpty(buffer, n))
-                continue;
-            
-            // Parse username registration command
-            // Protocol: /username <name>\n
-            // parse_username extracts the username into tempUsername
-            if (parse_username(buffer, tempUsername, sizeof(tempUsername)))
+
+            // Ignore empty or whitespace-only messages
+            if (isBufferEmpty(buffer, n)) continue;
+
+            // ── Authentication commands (/register or /login) ────────────────
+            temp_user_credentials temp;
+            if (parse_credentials(buffer, temp))
             {
-                // Check if username is already taken
-                if (IsDuplicated_Username(tempUsername)) {
-                    // Send error code "101" to client
-                    send(fd, DUPLICATED_USERNAME_ERROR, strlen(DUPLICATED_USERNAME_ERROR), 0);
-                    memset(buffer, 0, BUFFER_SIZE);
-                    continue;
+                if (temp.cmd_type == 2) {
+                    // Registration: check for duplicate username first
+                    if (IsDuplicated_Username(temp.username.c_str())) {
+                        const char* error_msg = "Error: username already taken\n";
+                        send(fd, error_msg, strlen(error_msg), 0);
+                        continue;
+                    }
+                    // Persist credentials and acknowledge success
+                    save_credentials(temp.username, temp.password);
+                    std::string success_msg = "Registered " + temp.username + "\n";
+                    send(fd, success_msg.c_str(), success_msg.size(), 0);
                 }
-                
-                // Register the username
-                clients[fd].username = tempUsername;
-                usernames.insert(tempUsername);  // Add to set for duplicate checking
-                
-                // Send success confirmation to client
-                const char* success_msg = "OK\n";
-                send(fd, success_msg, strlen(success_msg), 0);
-                
-                continue;  // Done processing username registration
-            }
-            
-            // Accumulate message data in write_buffer
-            // TCP is a stream protocol - messages may arrive in chunks
-            // We need to buffer partial messages until we get a complete one
-            clients[fd].write_buffer += buffer;
-            
-            // If no newline yet, we don't have a complete message
-            // Keep accumulating and wait for more data
-            if (!has_newline)
+                // TODO: cmd_type == 1 (login) — validate credentials against JSON
+
+                // Associate the username with this fd
+                clients[fd].username = temp.username;
+                clients[fd].write_buffer.clear();
+                usernames.insert(temp.username); // mark username as taken
                 continue;
-            
-            // We have a complete message - broadcast it to all other clients
-            // Format: "username: message\n"
-            std::string msg = clients[fd].username + ": " + 
-                            clients[fd].write_buffer + "\n";
-            
-            // Clear the buffer now that we've used the message
-            clients[fd].write_buffer.clear();
-            
-            // Broadcast to all connected clients except the sender
-            // Using structured bindings (C++17): [fd, data] = pair<int, Client>
+            }
+
+            // ── Reject unauthenticated chat messages ─────────────────────────
+            // A client must register/login before sending chat messages
+            if (clients[fd].username.empty()) {
+                const char* error_msg = "Error: please register first\n";
+                send(fd, error_msg, strlen(error_msg), 0);
+                continue;
+            }
+
+            // ── Accumulate message chunks ────────────────────────────────────
+            // Messages may arrive in multiple recv() calls; buffer until '\n'
+            clients[fd].write_buffer += buffer;
+
+            if (!has_newline) continue; // message is incomplete — wait for more data
+
+            // Build the final broadcast message: "username: message\n"
+            std::string msg = clients[fd].username + ": " +
+                              clients[fd].write_buffer + "\n";
+
+            clients[fd].write_buffer.clear(); // reset for next message
+
+            // ── Broadcast to all OTHER clients ───────────────────────────────
+            // Collect failing fds first to avoid iterator invalidation
+            // while erasing from the clients map mid-loop
+            std::vector<int> to_disconnect;
+
             for (auto& [client_fd, client_data] : clients)
             {
-                // Don't send message back to the sender
-                if (client_fd == fd)
-                    continue;
-                
-                // Send the message to this client
-                // Returns: number of bytes sent, or -1 on error
+                if (client_fd == fd) continue; // skip sender
+
                 ssize_t sent = send(client_fd, msg.c_str(), msg.size(), 0);
-                
-                // If send fails, the client likely disconnected
                 if (sent <= 0) {
                     perror("send");
-                    disconnect_client(client_fd);
-                    // Note: This modifies the map we're iterating over
-                    // This is safe in C++ because we break/continue immediately
+                    to_disconnect.push_back(client_fd); // mark for removal
                 }
+            }
+
+            // Disconnect failed clients after the iteration is complete
+            for (int disc_fd : to_disconnect) {
+                disconnect_client(disc_fd);
             }
         }
     }
 }
 
-/**
- * Destructor: Clean up all resources when server shuts down
- * 
- * Steps:
- * 1. Close all client connections
- * 2. Close the epoll instance
- * 3. Close the server socket
- */
+// ---------------------------------------------------------------------------
+// Destructor
+// ---------------------------------------------------------------------------
 TcpServer::~TcpServer()
 {
     // Close all client sockets
-    // Using structured bindings to iterate over the map
     for (auto& [fd, client] : clients) {
-        close(fd);  // Close the socket connection
+        close(fd);
     }
-    
-    // Close the epoll file descriptor
-    close(epoll_fd);
-    
-    // Close the server socket (stop listening for new connections)
-    close(server_fd);
-    
+    clients.clear();
+
+    // Close control file descriptors
+    if (epoll_fd >= 0) close(epoll_fd);
+    if (server_fd >= 0) close(server_fd);
+
     std::cout << "Server shut down successfully" << std::endl;
 }
 
-/**
- * Check if a username is already registered
- * 
- * @param new_username Username to check
- * @return true if username exists, false otherwise
- * 
- * Uses std::unordered_set for O(1) average lookup time
- */
-bool TcpServer::IsDuplicated_Username(const char *new_username)
+// ---------------------------------------------------------------------------
+// Username uniqueness check
+// ---------------------------------------------------------------------------
+bool TcpServer::IsDuplicated_Username(const char* new_username)
 {
-    // count() returns 1 if found, 0 if not found
+    // unordered_set::count is O(1) average — returns 1 if found, 0 otherwise
     return usernames.count(new_username) > 0;
 }
 
-/**
- * Disconnect a client and clean up all associated resources
- * 
- * @param client_fd File descriptor of the client to disconnect
- * 
- * Steps:
- * 1. Remove from epoll monitoring (stop getting notifications)
- * 2. Close the socket connection
- * 3. Remove username from the set
- * 4. Remove client entry from the map
- */
+// ---------------------------------------------------------------------------
+// Client disconnection
+// ---------------------------------------------------------------------------
 void TcpServer::disconnect_client(int client_fd)
 {
-    // Stop monitoring this socket in epoll
-    // Important: Do this BEFORE closing the socket
-    remove_from_epoll(client_fd);
-    
-    // Close the socket connection
-    close(client_fd);
-    
-    // Find the client in our map
+    remove_from_epoll(client_fd); // stop monitoring this fd
+    close(client_fd);             // release the OS file descriptor
+
     auto it = clients.find(client_fd);
     if (it != clients.end()) {
-        // Remove their username from the set (makes it available for others)
-        usernames.erase(it->second.username);
-        
-        // Remove the client entry from the map
-        clients.erase(it);
+        usernames.erase(it->second.username); // free the username slot
+        clients.erase(it);                    // remove from active client map
     }
 }
