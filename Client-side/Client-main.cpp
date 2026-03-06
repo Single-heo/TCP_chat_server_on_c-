@@ -138,8 +138,13 @@ int TcpClient::connect_and_authenticate(const char* server_ipv4_address)
         if (strncmp(response, "Registered", 10) == 0) {
             std::cout << "\n✓ Authentication successful!\n";
             username = creds.username; // store for use in the chat loop
-        } else if (strncmp(response, "Error:", 6) == 0) {
+        }else if (strncmp(response, "Login successful", 16) == 0) {
+            std::cout << "\n✓ Login successful!\n";
+            username = creds.username; // store for use in the chat loop
+        }
+        else if (strncmp(response, "Error:", 6) == 0) {
             std::cerr << "\n✗ " << response;
+            std::cerr << "Authentication failed. Please restart the client and try again.\n";
             exit(1);
         }
     } else {
@@ -503,7 +508,7 @@ void handle_stdin(int sockfd)
                     close(sockfd);
                     exit(0);
                 }
-
+            
                 // Append newline as message terminator (server reads until '\n')
                 input_buffer += '\n';
                 send(sockfd, input_buffer.c_str(), input_buffer.size(), 0);

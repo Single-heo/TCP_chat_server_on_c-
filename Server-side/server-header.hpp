@@ -51,6 +51,9 @@ public:
     // Persists a username/password pair into the JSON credentials database
     void save_credentials(const std::string& username, const std::string& password);
 
+    // Verify if the user already has a login on the system
+    bool verify_credentials(const std::string& username, const std::string& password);
+
     // Main event loop: uses epoll to multiplex server fd and all client fds
     void run();
 

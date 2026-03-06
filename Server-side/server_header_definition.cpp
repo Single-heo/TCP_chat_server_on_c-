@@ -173,12 +173,22 @@ void TcpServer::save_credentials(const std::string& username, const std::string&
     if (!data.contains("users") || !data["users"].is_array()) {
         data["users"] = json::array();
     }
+    // Get current time
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm* tm_ptr = std::localtime(&t);
+
+
+    // --- Option 2: Full timestamp "2025-02-26 14:35:22" ---
+    std::ostringstream datetime_ss;
+    datetime_ss << std::put_time(tm_ptr, "%Y-%m-%d %H:%M:%S");
+    std::string created_at = datetime_ss.str();  // "2025-03-05 14:35:22"
 
     // Build the new user entry
     json user;
     user["username"]   = username;
     user["password"]   = password;             // TODO: hash before storing (e.g. bcrypt)
-    user["created_at"] = "2025-02-26";         // TODO: replace with real timestamp via <chrono>
+    user["created_at"] = created_at;         // TODO: replace with real timestamp via <chrono>
 
     data["users"].push_back(user);
 
@@ -190,6 +200,27 @@ void TcpServer::save_credentials(const std::string& username, const std::string&
         std::cout << "Credentials saved for user: " << username << std::endl;
     } else {
         std::cerr << "Failed to open credentials file for writing" << std::endl;
+    }
+}
+
+bool TcpServer::verify_credentials(const std::string &username, const std::string &password)
+{
+    // Open and parse the JSON file
+    std::ifstream file("../DataBase/credentials.json");
+    nlohmann::json data;
+    file >> data;
+
+    // Loop through all users
+    for (const auto& user : data["users"]) {
+        std::string created_at = user["created_at"];
+        std::string password   = user["password"];
+        std::string username   = user["username"];
+
+        // Check for matching username and password
+        if (username == username && password == password) {
+            return true; // Valid credentials
+        }
+        return false; // No match found
     }
 }
 
@@ -273,6 +304,17 @@ void TcpServer::run()
                     send(fd, success_msg.c_str(), success_msg.size(), 0);
                 }
                 // TODO: cmd_type == 1 (login) — validate credentials against JSON
+                if(temp.cmd_type == 1) {
+                    // For now, just acknowledge the login attempt without validation
+                    if(verify_credentials(temp.username, temp.password)){
+                            std::string success_msg = "Login successful for " + temp.username + "\n";
+                            send(fd, success_msg.c_str(), success_msg.size(), 0);
+                        } else {
+                            const char* error_msg = "Error: invalid username or password\n";
+                            send(fd, error_msg, strlen(error_msg), 0);
+                            continue;
+                    }
+                }
 
                 // Associate the username with this fd
                 clients[fd].username = temp.username;

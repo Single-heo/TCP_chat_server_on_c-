@@ -51,7 +51,7 @@ private:
 public:
     std::string username{};      // Authenticated username (set after successful auth)
     char buffer[BUFFER_SIZE]{};  // Reusable recv buffer
-
+    
     // Prompts for username and password; validates and returns a UserCredentials struct
     UserCredentials get_user_credentials(AuthMode mode);
 
