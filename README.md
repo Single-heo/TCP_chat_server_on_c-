@@ -1,158 +1,199 @@
-# TCP Chat Server (C++) — epoll-based
+# TCP Chat Application
 
-A multi-client TCP chat server written in **C++** using **Linux sockets** and **epoll** for scalable I/O multiplexing. The project is organized into modular components covering the server, client, database layer, and shared utilities — all built with **CMake**.
-
----
-
-## 🚀 Features
-
-- Multi-client TCP chat server
-- Uses **epoll** for event-driven I/O
-- Non-blocking sockets
-- Graceful handling of client disconnects
-- Username registration
-- Message broadcasting to all connected clients
-- Signal-safe (`SIGPIPE` ignored)
-- **Database layer** for persistent storage
-- Modular architecture with shared `common/` utilities
-- CMake-based build system
-- Designed for Linux
+A multi-client TCP chat application written in C++ using socket programming and CMake.
 
 ---
 
-## 🧠 Why epoll instead of select?
+## What's New
 
-| `select()` | `epoll()` |
-|---|---|
-| O(n) scan every call | O(1) event notification |
-| fd limit (`FD_SETSIZE`) | Virtually unlimited |
-| Copies fd sets each time | Kernel-managed interest list |
-| Poor scalability | Excellent for many clients |
+### Authentication System
+The server now supports full account registration and login. Clients must authenticate before sending messages.
 
-`epoll` is the **industry-standard** choice for high-performance Linux servers.
+- `/register <username>|<password>` — creates a new account, persisted to `DataBase/credentials.json`
+- `/login <username>|<password>` — authenticates against stored credentials
+- Credentials are validated for length, empty fields, and forbidden characters before being sent to the server
+- Server responds with a success or `Error:` message; the client exits on auth failure after 3 attempts
+
+### Credential Persistence (JSON Database)
+User accounts are saved to `DataBase/credentials.json` using [nlohmann/json](https://github.com/nlohmann/json). Each entry stores a username, password, and `created_at` timestamp.
+
+> ⚠️ Passwords are currently stored in plain text. Hashing (e.g. bcrypt) is planned.
+
+### epoll-based Server (replaces `select()`)
+The server I/O loop has been migrated from `select()` to Linux `epoll`, improving scalability for concurrent clients.
+
+- `epoll_create1`, `epoll_ctl`, `epoll_wait` replace `FD_SET` / `select()`
+- Clients are registered/deregistered dynamically via `add_to_epoll` / `remove_from_epoll`
+- 1000 ms timeout on `epoll_wait` allows periodic `SERVER_IS_RUNNING` checks
+
+### Client-side Commands
+The client now supports in-chat slash commands:
+
+| Command  | Description              |
+|----------|--------------------------|
+| `/clear` | Clear the terminal screen |
+| `/exit`  | Disconnect and exit       |
+| `/help`  | Show available commands   |
+
+Unknown commands beginning with `/` print a local error and are not sent to the server. Regular messages are sent normally.
+
+### Improved Input Handling
+- `verify_command` now correctly uses `else if` chains — previously all branches were independent `if` statements, causing regular chat messages to never be sent
+- Printable ASCII filter in `handle_stdin` rejects control characters, escape sequences, and non-ASCII bytes
+- Backspace renders correctly with `\b \b` (move back, erase, move back)
+
+### Wire Protocol Update
+
+| Direction       | Format                                  |
+|-----------------|-----------------------------------------|
+| Register        | `/register <username>\|<password>\n`    |
+| Login           | `/login <username>\|<password>\n`       |
+| Chat message    | `<message>\n`                           |
+| Server broadcast| `<username>: <message>\n`               |
 
 ---
 
-## 🗂️ Project Structure
+## Features
+
+- Multi-client support via `epoll` I/O multiplexing
+- Account registration and login with JSON persistence
+- Credential validation (length, empty fields, reserved characters)
+- Real-time message broadcasting to all connected clients
+- Non-blocking terminal input with raw mode (no line buffering)
+- Slash-command support with local dispatch
+- Graceful client disconnection and username slot release
+
+---
+
+## Requirements
+
+- C++17 or later
+- CMake 3.10 or later
+- Linux (uses `epoll`, POSIX sockets, `termios`)
+- GCC or Clang
+- [nlohmann/json](https://github.com/nlohmann/json) (header-only, included or installed via package manager)
+
+---
+
+## Project Structure
 
 ```
 .
-├── Server-side/          # Server source code
-├── Client-side/          # Client source code
-├── DataBase/             # Database integration layer
-├── common/               # Shared headers and utilities
-├── CMakeLists.txt        # CMake build configuration
-├── .gitignore
+├── CMakeLists.txt
+├── DataBase/
+│   └── credentials.json          # Auto-created on first registration
+├── Client-side/
+│   ├── Client-main.cpp           # Client entry point + main I/O loop
+│   └── client_header.hpp         # TcpClient class definition
+├── Server-side/
+│   ├── Server_main.cpp           # Server entry point
+│   ├── server-header.hpp         # TcpServer class declaration
+│   └── server_header_definition.cpp  # TcpServer implementation
+├── common/
+│   └── input.hpp                 # Shared utilities: buffer helpers, credential parser
 └── README.md
 ```
 
 ---
 
-## ⚙️ Build
+## Building
 
-### Requirements
-
-- Linux (epoll is Linux-specific)
-- g++ (C++17 or newer)
-- CMake 3.x+
-
-### Compile with CMake
+### Using CMake (Recommended)
 
 ```bash
+git clone https://github.com/Single-heo/TCP_chat_server_on_c-.git
+cd TCP_chat_server_on_c-
+
 mkdir build && cd build
 cmake ..
-make
+make -j$(nproc)
 ```
 
-Binaries will be placed in the `build/` directory after compilation.
+Executables will be placed in the `build/` directory as `./server` and `./client`.
+
+### Build Types
+
+```bash
+cmake -DCMAKE_BUILD_TYPE=Debug ..    # with debug symbols
+cmake -DCMAKE_BUILD_TYPE=Release ..  # optimized
+```
+
+### Clean Rebuild
+
+```bash
+rm -rf build && mkdir build && cd build && cmake .. && make -j$(nproc)
+```
 
 ---
 
-## ▶️ Run
+## Usage
 
-### Start the server
+### 1. Start the server
 
 ```bash
 ./server
 ```
 
-### Start one or more clients
+The server binds to `127.0.0.1:25565` by default.
+
+### 2. Connect a client
 
 ```bash
 ./client
 ```
 
-Each client will be prompted for a username before joining the chat.
+You will be prompted for the server IP, then asked to register or log in.
+
+### 3. Chat
+
+Type a message and press **Enter** to broadcast it. Use `/help` to see available commands.
 
 ---
 
-## 🧩 epoll Design Overview
+## Architecture
 
-### epoll lifecycle
+### Server
 
-1. Create epoll instance
-2. Register server socket
-3. Wait for events using `epoll_wait()`
-4. Accept new connections or read client data
-5. Broadcast messages to all connected clients
-6. Remove disconnected clients
+- `epoll`-based event loop handles the server socket and all client fds in a single thread
+- New connections are accepted in `handle_new_connection()` and rejected if `MAX_CLIENTS` (7) is reached
+- Auth commands (`/register`, `/login`) are parsed before any chat message is processed
+- Unauthenticated clients receive an error if they attempt to send chat messages
+- Partial messages are buffered per client until a `\n` is received, then broadcast
 
-### Key syscalls used
+### Client
 
-- `epoll_create1()`
-- `epoll_ctl()`
-- `epoll_wait()`
-- `fcntl()` (non-blocking mode)
-- `accept()` / `recv()` / `send()`
+- `select()` multiplexes stdin and the server socket in the main loop
+- Terminal is switched to raw mode (`ICANON` + `ECHO` disabled) on connect and restored on exit
+- `stdin` is set to `O_NONBLOCK` so keyboard reads never block the socket loop
+- `verify_command` dispatches slash commands locally or forwards plain messages to the server
 
 ---
 
-## 🔄 Event Flow
+## Known Limitations
 
-- **Server socket ready** → Accept new client
-- **Client socket ready** → Read incoming message
-- **Client disconnects** → Remove fd from epoll + close socket
-
----
-
-## 🗄️ Database Layer
-
-The `DataBase/` module handles persistent storage. This includes storing user data or chat history. It is decoupled from the server logic through the shared `common/` interface, keeping the architecture clean and extensible.
+- Passwords are stored in plain text — hashing is not yet implemented
+- Server binds to localhost only (`127.0.0.1`)
+- No message history
+- No encryption (plain text over TCP)
+- Maximum 7 simultaneous clients
 
 ---
 
-## 🛡️ Safety & Stability
+## Planned
 
-- `SIGPIPE` is ignored to prevent crashes on writes to closed sockets
-- All sockets are set to non-blocking mode
-- epoll events are centrally managed
-- Modular design separates concerns across server, client, and database layers
-
----
-
-## 🧪 Tested On
-
-- Ubuntu / Debian-based distros
-- Kernel 5.x+
+- Password hashing (bcrypt or similar)
+- Private messaging (`/msg <user> <text>`)
+- Configurable bind address and port via CLI args
+- Message history / scrollback
+- SSL/TLS support
+- Chat rooms / channels
 
 ---
 
-## 📌 Notes
+## License
 
-- This is a learning-focused project exploring low-level networking and system design in C++
-- Not intended for production use without further hardening (TLS, authentication, etc.)
+Open source — available for educational purposes.
 
----
+## Author
 
-## 📜 License
-
-MIT License
-
----
-
-## 👤 Author
-
-**Single-heo**
-Refactored to epoll-based architecture with modular CMake project structure.
-
----
+Built as a learning project for network programming and POSIX socket APIs in C++.
