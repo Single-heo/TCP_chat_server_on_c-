@@ -18,7 +18,7 @@ static std::string username{};      // Display name prepended to the prompt
 // Forward declarations
 void restore_stdin();
 void setup_stdin();
-void handle_stdin(int sockfd);
+void handle_stdin(int sockfd, TcpClient* client);
 
 // ---------------------------------------------------------------------------
 // Constructor — creates the TCP socket
@@ -183,6 +183,40 @@ int TcpClient::verify_error_connection(int error_code)
             break;
     }
     return -1;
+}
+
+// ---------------------------------------------------------------------------
+// verify_command — handles slash-commands or sends regular chat messages
+// ---------------------------------------------------------------------------
+void TcpClient::verify_command(std::string *input_buffer, int sockfd)
+{
+    if (input_buffer->substr(0, 6) == "/clear") {
+        system("clear");
+        input_buffer->clear();
+    }
+    else if (input_buffer->substr(0, 5) == "/exit") {
+        restore_stdin();
+        std::cout << "\nExiting chat client.\n";
+        close(sockfd);
+        exit(0);
+    }
+    else if (input_buffer->substr(0, 5) == "/help") {
+        std::cout << "\nAvailable commands:\n";
+        std::cout << "  /clear - Clear the chat screen\n";
+        std::cout << "  /exit  - Exit the chat client\n";
+        std::cout << "  /help  - Show this help message\n";
+        input_buffer->clear();
+    }
+    else if (!input_buffer->empty() && input_buffer->front() == '/') {
+        std::cout << "\nError: unknown command '" << *input_buffer << "'\n";
+        input_buffer->clear();
+    }
+    else {
+        // Regular chat message — send to server
+        input_buffer->append("\n");
+        send(sockfd, input_buffer->c_str(), input_buffer->size(), 0);
+        input_buffer->clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +440,7 @@ int main()
 
         // ── Handle keyboard input ────────────────────────────────────────────
         if (registered && FD_ISSET(STDIN_FILENO, &read_fds))
-            handle_stdin(sockfd);
+            handle_stdin(sockfd, &client);
 
         // ── Handle incoming server data ──────────────────────────────────────
         if (FD_ISSET(sockfd, &read_fds))
@@ -478,68 +512,71 @@ void setup_stdin()
 
 // ---------------------------------------------------------------------------
 // handle_stdin — reads raw keypresses and manages the input_buffer
+// Called each time select() signals stdin is ready for reading.
+// Because stdin is non-blocking (O_NONBLOCK), we drain ALL available
+// characters in a tight loop rather than reading just one per select wakeup.
 // ---------------------------------------------------------------------------
-void handle_stdin(int sockfd)
+void handle_stdin(int sockfd, TcpClient* client)
 {
     char c;
 
-    // Drain all available characters from stdin (non-blocking loop)
+    // Drain every character currently available on stdin.
+    // read() returns <= 0 when the buffer is empty (EAGAIN) or on error,
+    // at which point we stop and hand control back to the select() loop.
     while (true)
     {
         ssize_t r = read(STDIN_FILENO, &c, 1);
-        if (r <= 0) break; // EAGAIN (no data) or error — stop draining
+        if (r <= 0) break; // EAGAIN (no more data) or unrecoverable error
 
-        // ── Enter key: submit message ────────────────────────────────────────
+        // ── Enter / Return key: submit whatever is in the buffer ─────────────
         if (c == '\n' || c == '\r')
         {
-            if (!input_buffer.empty())
-            {
-                // Built-in commands handled locally without sending to server
-                if (input_buffer == "/clear") {
-                    system("clear"); // clear terminal screen
-                    input_buffer.clear();
-                    std::cout << username << "> ";
-                    std::cout.flush();
-                    continue;
-                }
-                if (input_buffer == "/exit") {
-                    restore_stdin();
-                    std::cout << "\nExiting chat client.\n";
-                    close(sockfd);
-                    exit(0);
-                }
-            
-                // Append newline as message terminator (server reads until '\n')
-                input_buffer += '\n';
-                send(sockfd, input_buffer.c_str(), input_buffer.size(), 0);
-                input_buffer.clear();
+            if (!input_buffer.empty()) {
+                // Route the buffer through verify_command:
+                //   • slash-commands (/clear, /exit, /help) are handled locally
+                //   • unknown slash-commands print an error
+                //   • plain text is sent to the server as a chat message
+                client->verify_command(&input_buffer, sockfd);
             }
 
-            // Redraw prompt on a new line
+            // Always redraw the prompt on a fresh line, even for empty Enter presses,
+            // so the terminal doesn't look broken after the user hits Enter
             std::cout << "\n" << username << "> ";
             std::cout.flush();
             continue;
         }
 
-        // ── Backspace / DEL key ──────────────────────────────────────────────
+        // ── Backspace (127 = DEL on most terminals) or legacy \b ────────────
         if (c == 127 || c == '\b')
         {
             if (!input_buffer.empty()) {
-                input_buffer.pop_back();
-                // "\b \b": move cursor back, overwrite with space, move back again
+                input_buffer.pop_back(); // remove last logical character
+
+                // Terminal sequence to visually erase the character:
+                //   \b   — move cursor one position left
+                //   ' '  — overwrite the character with a space
+                //   \b   — move cursor left again, ready for next input
                 std::cout << "\b \b";
                 std::cout.flush();
             }
+            // If buffer is already empty, silently ignore the backspace
+            // (no bell or error — keeps UX clean)
             continue;
         }
 
-        // ── Printable ASCII only (0x20–0x7E) ─────────────────────────────────
-        // Filters out escape sequences, control chars, and non-ASCII bytes
+        // ── Printable ASCII characters (0x20 space … 0x7E tilde) ────────────
+        // Rejects:
+        //   • control characters (0x00–0x1F): escape sequences, Ctrl+C, etc.
+        //   • DEL (0x7F): already handled above
+        //   • high bytes (0x80+): multi-byte UTF-8 sequences we don't support
         if (c >= 32 && c < 127) {
-            input_buffer += c;
-            std::cout << c;  // manual echo since ECHO is disabled
+            input_buffer += c;  // append to logical buffer
+
+            // Manual echo: ECHO is disabled in raw mode (setup_stdin),
+            // so we must write each character ourselves to keep the
+            // display in sync with input_buffer
+            std::cout << c;
             std::cout.flush();
         }
     }
 }
-

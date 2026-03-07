@@ -51,7 +51,16 @@ private:
 public:
     std::string username{};      // Authenticated username (set after successful auth)
     char buffer[BUFFER_SIZE]{};  // Reusable recv buffer
-    
+
+    /*
+    - This function do the verifications on the commands send by the client in other words everything with "/" at the buffer
+    - If the command is not recognized it will send an error message to the client and ignore the command
+    - If the command is recognized it will execute the corresponding action (for now we only have the /username command to set the username of the client)
+    @param command the command send by the client
+    @param sockfd the socket file descriptor
+    */
+    void verify_command(std::string *input_buffer, int sockfd);
+
     // Prompts for username and password; validates and returns a UserCredentials struct
     UserCredentials get_user_credentials(AuthMode mode);
 

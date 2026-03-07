@@ -203,25 +203,35 @@ void TcpServer::save_credentials(const std::string& username, const std::string&
     }
 }
 
-bool TcpServer::verify_credentials(const std::string &username, const std::string &password)
+bool TcpServer::verify_credentials(const std::string& username, const std::string& password)
 {
-    // Open and parse the JSON file
     std::ifstream file("../DataBase/credentials.json");
-    nlohmann::json data;
-    file >> data;
-
-    // Loop through all users
-    for (const auto& user : data["users"]) {
-        std::string created_at = user["created_at"];
-        std::string password   = user["password"];
-        std::string username   = user["username"];
-
-        // Check for matching username and password
-        if (username == username && password == password) {
-            return true; // Valid credentials
-        }
-        return false; // No match found
+    if (!file.is_open()) {
+        std::cerr << "Failed to open credentials file\n";
+        return false;
     }
+
+    nlohmann::json data;
+    try {
+        file >> data;
+    } catch (nlohmann::json::parse_error& e) {
+        std::cerr << "JSON parse error: " << e.what() << "\n";
+        return false;
+    }
+
+    if (!data.contains("users") || !data["users"].is_array())
+        return false;
+
+    for (const auto& user : data["users"]) {
+        // Use different variable names to avoid shadowing the parameters
+        const std::string stored_username = user["username"];
+        const std::string stored_password = user["password"];
+
+        if (stored_username == username && stored_password == password)
+            return true; // match found — credentials are valid
+    }
+
+    return false; // exhausted all users with no match
 }
 
 // ---------------------------------------------------------------------------
