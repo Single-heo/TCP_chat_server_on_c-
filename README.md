@@ -195,5 +195,6 @@ Type a message and press **Enter** to broadcast it. Use `/help` to see available
 Open source — available for educational purposes.
 
 ## Author
+### Heitor Zanin Mello
 
 Built as a learning project for network programming and POSIX socket APIs in C++.
