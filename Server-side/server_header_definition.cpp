@@ -4,6 +4,16 @@
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
+
+void TcpServer::set_NonBlocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) { perror("fcntl F_GETFL"); return; }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl F_SETFL O_NONBLOCK");
+    }
+}
+
 TcpServer::TcpServer(int _port, const char* ipv4_address)
 {
     // Ignore SIGPIPE so that send() to a closed socket returns -1 instead of
@@ -15,6 +25,7 @@ TcpServer::TcpServer(int _port, const char* ipv4_address)
 
     // AF_INET = IPv4 | SOCK_STREAM = TCP | protocol 0 = auto-select
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    set_NonBlocking(server_fd);
     if (server_fd == -1) {
         std::cerr << "Socket creation error" << std::endl;
         throw std::runtime_error("Socket creation failed");
@@ -65,7 +76,7 @@ void TcpServer::initialize_epoll()
 
     // Register the server socket for EPOLLIN (incoming connection events)
     struct epoll_event ev{};
-    ev.events  = EPOLLIN;
+    ev.events  = EPOLLIN | EPOLLET;
     ev.data.fd = server_fd;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) == -1) {
@@ -110,6 +121,7 @@ void TcpServer::handle_new_connection()
 
     // accept() extracts the first queued connection and returns a new fd for it
     int new_fd = accept(server_fd, (sockaddr*)&client_addr, &len);
+    set_NonBlocking(new_fd);
     if (new_fd < 0) {
         perror("accept");
         return;
@@ -128,10 +140,12 @@ void TcpServer::handle_new_connection()
     add_to_epoll(new_fd, EPOLLIN);
 
     clients[new_fd].fd           = new_fd;
+    clients[new_fd].ip_address   = inet_ntoa(client_addr.sin_addr); // store client IP as display name
+    clients[new_fd].port         = ntohs(client_addr.sin_port);      // store client source port (not used in current implementation)
     clients[new_fd].username     = "";   // username is empty until /register or /login
     clients[new_fd].write_buffer = "";
 
-    std::cout << "Client connected fd=" << new_fd << std::endl;
+    std::cout << "Client connected fd=" << new_fd << ", IP=" << clients[new_fd].ip_address << ", Port=" << clients[new_fd].port << std::endl;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +160,7 @@ void TcpServer::Shutting_down()
 // ---------------------------------------------------------------------------
 // Credential persistence
 // ---------------------------------------------------------------------------
-void TcpServer::save_credentials(const std::string& username, const std::string& password)
+void TcpServer::save_credentials(const std::string& username, const std::string& password, const std::string& ip_addr)
 {
     using json = nlohmann::json;
     json data;
@@ -188,6 +202,7 @@ void TcpServer::save_credentials(const std::string& username, const std::string&
     json user;
     user["username"]   = username;
     user["password"]   = password;             // TODO: hash before storing (e.g. bcrypt)
+    user["IP_source"]  = ip_addr;
     user["created_at"] = created_at;         // TODO: replace with real timestamp via <chrono>
 
     data["users"].push_back(user);
@@ -309,7 +324,7 @@ void TcpServer::run()
                         continue;
                     }
                     // Persist credentials and acknowledge success
-                    save_credentials(temp.username, temp.password);
+                    save_credentials(temp.username, temp.password, clients[fd].ip_address);
                     std::string success_msg = "Registered " + temp.username + "\n";
                     send(fd, success_msg.c_str(), success_msg.size(), 0);
                 }
@@ -394,6 +409,8 @@ TcpServer::~TcpServer()
 
     std::cout << "Server shut down successfully" << std::endl;
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Username uniqueness check

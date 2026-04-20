@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fcntl.h>
 #include <iostream>
 #include <sys/epoll.h>      // epoll_create1, epoll_ctl, epoll_wait
 #include <netinet/in.h>     // sockaddr_in
@@ -28,10 +29,12 @@
 class TcpServer {
 public:
     // Constructs the server: creates socket, sets SO_REUSEADDR, binds, and starts listening
-    TcpServer(int _port, const char* ipv4_address = "127.0.0.1");
+    TcpServer(int _port = 25565, const char* ipv4_address = "127.0.0.1");
 
     // Destructor: closes all client fds, epoll fd, and server fd
     ~TcpServer();
+
+    void set_NonBlocking(int fd);
 
     // Creates epoll instance and registers the server fd for incoming connections
     void initialize_epoll();
@@ -49,7 +52,7 @@ public:
     void Shutting_down();
 
     // Persists a username/password pair into the JSON credentials database
-    void save_credentials(const std::string& username, const std::string& password);
+    void save_credentials(const std::string& username, const std::string& password, const std::string& ip_addr);
 
     // Verify if the user already has a login on the system
     bool verify_credentials(const std::string& username, const std::string& password);
@@ -63,6 +66,8 @@ public:
     // Represents a connected client with its socket fd, display name, and incomplete message buffer
     struct Client {
         int fd{};
+        std::string ip_address{};  // Display name set by client (default empty string)
+        int port{};   // Client's source port (not used in current implementation, but stored for potential future use)
         std::string username{};
         std::string write_buffer{};  // Accumulates partial messages until '\n' is received
     };
