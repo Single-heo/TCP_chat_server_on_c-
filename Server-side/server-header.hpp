@@ -1,93 +1,144 @@
 #pragma once
 
+// Password hashing (Argon2 algorithm) — used via libsodium's crypto_pwhash API
+#include <argon2.h>
+// libsodium: crypto primitives for hashing and future encryption
+#include <sodium.h>
+// fcntl: F_GETFL, F_SETFL for setting O_NONBLOCK on sockets
 #include <fcntl.h>
 #include <iostream>
-#include <sys/epoll.h>      // epoll_create1, epoll_ctl, epoll_wait
-#include <netinet/in.h>     // sockaddr_in
-#include <sys/socket.h>     // socket, bind, listen, accept, send, recv
-#include <sys/types.h>      // POSIX types
-#include <netdb.h>          // getaddrinfo (not used directly, kept for compatibility)
-#include <unistd.h>         // close, read
-#include <arpa/inet.h>      // inet_addr, htons
-#include <cstring>          // memset, strerror, strlen
-#include <csignal>          // signal, SIGPIPE, SIG_IGN
-#include <cerrno>           // errno
-#include <unordered_map>    // client registry
-#include <unordered_set>    // username uniqueness tracking
+// epoll_create1, epoll_ctl, epoll_wait — Linux I/O event notification
+#include <sys/epoll.h>
+// sockaddr_in: IPv4 socket address structure
+#include <netinet/in.h>
+// socket(), bind(), listen(), accept(), send(), recv()
+#include <sys/socket.h>
+// POSIX types: ssize_t, socklen_t, etc.
+#include <sys/types.h>
+// getaddrinfo — not used directly but kept for future DNS resolution support
+#include <netdb.h>
+// close(), read()
+#include <unistd.h>
+// inet_addr(), inet_ntoa(), htons() — IP/port byte-order conversions
+#include <arpa/inet.h>
+// memset(), strerror(), strlen()
+#include <cstring>
+// signal(), SIGPIPE, SIG_IGN
+#include <csignal>
+// errno — error codes from system calls
+#include <cerrno>
+// fd → Client map (O(1) average lookup by socket fd)
+#include <unordered_map>
+// Active username set for O(1) duplicate detection
+#include <unordered_set>
 #include <string>
 #include <vector>
-#include <nlohmann/json.hpp> // JSON serialization for credentials storage
+// nlohmann/json: header-only JSON library for credential persistence
+#include <nlohmann/json.hpp>
 
-// Shared input utilities: bufferEndsWith, trimBuffer, isBufferEmpty, parse_credentials, etc.
+// Shared utilities: bufferEndsWith, trimBuffer, isBufferEmpty,
+// parse_credentials, getString, getInt, etc.
 #include "../common/input.hpp"
 
-#define BUFFER_SIZE 1024        // Max bytes per recv() call
-#define DUPLICATED_USERNAME_ERROR "101"  // Protocol error code for duplicate usernames
-#define MAX_EVENTS 10           // Max epoll events processed per iteration
-#define MAX_CLIENTS 7           // Hard limit on simultaneous connected clients
+#define BUFFER_SIZE 1024               // Max bytes consumed per recv() call
+#define DUPLICATED_USERNAME_ERROR "101" // Protocol error code: username already taken
+#define MAX_EVENTS 10                  // Max events returned per epoll_wait() call
+#define MAX_CLIENTS 7                  // Hard cap on simultaneous connections
 
 class TcpServer {
 public:
-    // Constructs the server: creates socket, sets SO_REUSEADDR, binds, and starts listening
+    // Creates the listening socket, sets SO_REUSEADDR, binds to
+    // ipv4_address:_port, and calls listen(). Throws on failure.
     TcpServer(int _port = 25565, const char* ipv4_address = "127.0.0.1");
 
-    // Destructor: closes all client fds, epoll fd, and server fd
+    // Closes all client fds, the epoll fd, and the server fd
     ~TcpServer();
 
+    // Verifies a plaintext password against an Argon2id hash from the DB.
+    // Uses crypto_pwhash_str_verify — never compares plaintext directly.
+    bool verify_password(const std::string& password, const std::string& stored_hash);
+
+    // Hashes a plaintext password with Argon2id (interactive cost parameters).
+    // Returns the encoded hash string (includes salt, algorithm, params).
+    std::string hash_password(const std::string& password);
+
+    // Guarantees all `length` bytes of `buff` are sent to `fd`.
+    // Loops on send() to handle partial writes.
+    // Returns 0 on success, -1 on error.
+    int sendAll(int fd, const char* buff, int length);
+
+    // Sets O_NONBLOCK on `fd` via fcntl so all I/O calls return
+    // immediately with EAGAIN instead of blocking the event loop.
     void set_NonBlocking(int fd);
 
-    // Creates epoll instance and registers the server fd for incoming connections
+    // Creates the epoll instance and registers server_fd for
+    // EPOLLIN|EPOLLET (new incoming connections, edge-triggered).
     void initialize_epoll();
 
-    // Registers a file descriptor with epoll under the specified event mask
+    // Registers `fd` with epoll under the given event mask
+    // (e.g. EPOLLIN, EPOLLIN|EPOLLET, EPOLLIN|EPOLLOUT).
     void add_to_epoll(int fd, uint32_t events);
 
-    // Removes a file descriptor from epoll monitoring
+    // Deregisters `fd` from epoll monitoring.
+    // Safe to call with nullptr event (Linux >= 2.6.9).
     void remove_from_epoll(int fd);
 
-    // Accepts a new incoming connection; rejects if MAX_CLIENTS is reached
+    // Accepts a pending connection on server_fd.
+    // Rejects with an error message if MAX_CLIENTS is reached.
+    // Sets the new fd non-blocking and registers it with epoll.
     void handle_new_connection();
 
-    // Signals the run() loop to stop gracefully
+    // Sets SERVER_IS_RUNNING = false, causing run() to exit
+    // after the current epoll_wait iteration completes.
     void Shutting_down();
 
-    // Persists a username/password pair into the JSON credentials database
-    void save_credentials(const std::string& username, const std::string& password, const std::string& ip_addr);
+    // Reads the credentials JSON file, appends a new user entry
+    // with a hashed password and timestamp, and writes it back.
+    void save_credentials(const std::string& username,
+                          const std::string& password,
+                          const std::string& ip_addr);
 
-    // Verify if the user already has a login on the system
-    bool verify_credentials(const std::string& username, const std::string& password);
+    // Opens the credentials JSON file and searches for a matching
+    // username + password (via verify_password). Returns true if found.
+    bool verify_credentials(const std::string& username,
+                            const std::string& password);
 
-    // Main event loop: uses epoll to multiplex server fd and all client fds
+    // Main event loop. Calls initialize_epoll() then blocks on
+    // epoll_wait(), dispatching to handle_new_connection() or
+    // the message handling path on each ready fd.
     void run();
 
     int getServerFd() const { return server_fd; }
     int getPort()     const { return port; }
 
-    // Represents a connected client with its socket fd, display name, and incomplete message buffer
+    // Per-client state stored in the clients map
     struct Client {
-        int fd{};
-        std::string ip_address{};  // Display name set by client (default empty string)
-        int port{};   // Client's source port (not used in current implementation, but stored for potential future use)
-        std::string username{};
-        std::string write_buffer{};  // Accumulates partial messages until '\n' is received
+        int fd{};                  // Socket file descriptor
+        std::string ip_address{};  // Client's dotted-decimal IPv4 address
+        int port{};                // Client's ephemeral source port
+        std::string username{};    // Set after /register or /login; empty until then
+        std::string write_buffer{};// Accumulates recv() chunks until '\n' is seen
     };
 
-    // Set of active usernames — used for fast O(1) duplicate detection
+    // All currently authenticated and in-progress usernames.
+    // Checked before registration to enforce uniqueness within a session.
     std::unordered_set<std::string> usernames;
 
-    // Returns true if the given username is already registered in this session
+    // Returns true if `username` is already in the active usernames set.
     bool IsDuplicated_Username(const char* username);
 
-    // Cleanly removes a client: deregisters from epoll, closes fd, erases from maps
+    // Full client teardown: removes from epoll, closes fd,
+    // frees the username slot, and erases from the clients map.
     void disconnect_client(int client_fd);
 
-    // Maps socket fd -> Client struct for all currently connected clients
+    // Primary client registry: maps socket fd → Client struct.
+    // All active connections (authenticated or not) live here.
     std::unordered_map<int, Client> clients;
 
 private:
-    bool SERVER_IS_RUNNING{true};   // Loop control flag; set to false by Shutting_down()
-    char buffer[BUFFER_SIZE]{};     // Reusable recv buffer (zeroed before each read)
-    int server_fd{-1};              // Listening socket fd
-    int epoll_fd{-1};               // Epoll instance fd
-    int port{};                     // Port the server is bound to
+    bool SERVER_IS_RUNNING{true}; // Loop control; set false by Shutting_down()
+    char buffer[BUFFER_SIZE]{};   // Reusable recv buffer, zeroed before each read
+    int server_fd{-1};            // The listening socket fd
+    int epoll_fd{-1};             // The epoll instance fd
+    int port{};                   // Port this server is bound to
 };

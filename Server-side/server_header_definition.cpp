@@ -2,57 +2,73 @@
 #include <fstream>  // std::ifstream, std::ofstream for JSON file I/O
 
 // ---------------------------------------------------------------------------
-// Constructor
+// set_NonBlocking
 // ---------------------------------------------------------------------------
-
 void TcpServer::set_NonBlocking(int fd)
 {
+    // F_GETFL: read the current file status flags for fd
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) { perror("fcntl F_GETFL"); return; }
+
+    // F_SETFL: write back the flags with O_NONBLOCK added.
+    // After this, send()/recv()/accept() return EAGAIN immediately
+    // instead of sleeping until data/space is available.
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
         perror("fcntl F_SETFL O_NONBLOCK");
     }
 }
 
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 TcpServer::TcpServer(int _port, const char* ipv4_address)
 {
-    // Ignore SIGPIPE so that send() to a closed socket returns -1 instead of
-    // crashing the process with a signal
+    // Prevent SIGPIPE from killing the process when send() writes
+    // to a socket whose remote end has already closed.
+    // With SIG_IGN, send() returns -1 and sets errno = EPIPE instead.
     signal(SIGPIPE, SIG_IGN);
 
     std::cout << "Starting TCP server on " << ipv4_address << ":" << _port << "...\n";
     port = _port;
 
-    // AF_INET = IPv4 | SOCK_STREAM = TCP | protocol 0 = auto-select
+    // AF_INET  = IPv4
+    // SOCK_STREAM = TCP (reliable, ordered, byte-stream)
+    // 0 = auto-select protocol (TCP for SOCK_STREAM)
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    set_NonBlocking(server_fd);
     if (server_fd == -1) {
         std::cerr << "Socket creation error" << std::endl;
         throw std::runtime_error("Socket creation failed");
     }
 
-    // SO_REUSEADDR: allows re-binding to a port in TIME_WAIT state immediately
-    // after server restart — avoids "Address already in use" errors
+    // Set non-blocking immediately — must be done before epoll registration
+    // so that accept() in handle_new_connection() never blocks the event loop
+    set_NonBlocking(server_fd);
+
+    // SO_REUSEADDR: lets the OS reuse a port still in TIME_WAIT state.
+    // Without this, restarting the server within ~60s of shutdown gives
+    // "Address already in use".
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         std::cerr << "setsockopt(SO_REUSEADDR) failed" << std::endl;
     }
 
-    // Configure the server address structure
+    // Fill the address structure that tells bind() where to listen
     sockaddr_in address{};
     address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = inet_addr(ipv4_address); // convert dotted-decimal to binary
-    address.sin_port        = htons(port);              // host byte order -> network byte order
+    address.sin_addr.s_addr = inet_addr(ipv4_address); // dotted-decimal → 32-bit binary
+    address.sin_port        = htons(port);              // host byte order → network (big-endian)
 
-    // Bind the socket to the address/port
+    // Bind: associate the socket with the address/port.
+    // Fails if another process owns the port (and SO_REUSEADDR doesn't help).
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) == -1) {
         std::cerr << "Bind error: " << strerror(errno) << std::endl;
         close(server_fd);
         throw std::runtime_error("Bind failed");
     }
 
-    // Start listening; backlog of 3 means up to 3 connections can queue
-    // before accept() is called
+    // Listen: transition socket to passive mode, ready to accept connections.
+    // Backlog of 3 = OS will queue up to 3 unaccepted connections before
+    // refusing new ones with ECONNREFUSED.
     if (listen(server_fd, 3) == -1) {
         std::cerr << "Listen failed" << std::endl;
         close(server_fd);
@@ -63,22 +79,27 @@ TcpServer::TcpServer(int _port, const char* ipv4_address)
 }
 
 // ---------------------------------------------------------------------------
-// Epoll setup
+// initialize_epoll
 // ---------------------------------------------------------------------------
 void TcpServer::initialize_epoll()
 {
-    // epoll_create1(0): creates epoll instance; flag 0 = default (no CLOEXEC here)
+    // epoll_create1(0): allocates a new epoll instance in the kernel.
+    // Returns a file descriptor used in all subsequent epoll_ctl/epoll_wait calls.
+    // Flag 0 = no special options (use EPOLL_CLOEXEC to auto-close on exec if needed).
     epoll_fd = epoll_create1(0);
     if (epoll_fd == -1) {
         perror("epoll_create1");
         throw std::runtime_error("epoll_create1 failed");
     }
 
-    // Register the server socket for EPOLLIN (incoming connection events)
     struct epoll_event ev{};
+    // EPOLLIN  = notify when data is available to read (new connection on server_fd)
+    // EPOLLET  = edge-triggered: notify only once per state change,
+    //            not repeatedly while data remains. Requires non-blocking fds.
     ev.events  = EPOLLIN | EPOLLET;
-    ev.data.fd = server_fd;
+    ev.data.fd = server_fd; // store fd in the event so we know which fd fired
 
+    // EPOLL_CTL_ADD: register server_fd with the epoll instance
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) == -1) {
         perror("epoll_ctl: server_fd");
         throw std::runtime_error("epoll_ctl failed");
@@ -88,47 +109,99 @@ void TcpServer::initialize_epoll()
 }
 
 // ---------------------------------------------------------------------------
-// Epoll helpers
+// add_to_epoll / remove_from_epoll
 // ---------------------------------------------------------------------------
 
-// Registers fd with the given event mask (e.g. EPOLLIN, EPOLLIN|EPOLLOUT)
 void TcpServer::add_to_epoll(int fd, uint32_t events)
 {
     struct epoll_event ev{};
     ev.events  = events;
     ev.data.fd = fd;
 
+    // EPOLL_CTL_ADD: start monitoring `fd` for the specified events
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
         perror("epoll_ctl: add");
     }
 }
 
-// Removes fd from epoll; passing nullptr as event is valid since Linux 2.6.9
 void TcpServer::remove_from_epoll(int fd)
 {
+    // EPOLL_CTL_DEL: stop monitoring `fd`.
+    // The event pointer can be nullptr on Linux >= 2.6.9.
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == -1) {
         perror("epoll_ctl: del");
     }
 }
 
 // ---------------------------------------------------------------------------
-// New connection handler
+// hash_password / verify_password
+// ---------------------------------------------------------------------------
+
+std::string TcpServer::hash_password(const std::string& password)
+{
+    // sodium_init() is idempotent but should ideally be called once at startup.
+    // Returns 0 on success, 1 if already initialized, -1 on failure.
+    if (sodium_init() < 0) {
+        throw std::runtime_error("libsodium init failed");
+    }
+
+    // crypto_pwhash_STRBYTES: size of the output buffer including the
+    // encoded salt, algorithm ID, and parameters — all in one string.
+    char hash[crypto_pwhash_STRBYTES];
+
+    // crypto_pwhash_str: Argon2id password hashing.
+    // OPSLIMIT_INTERACTIVE / MEMLIMIT_INTERACTIVE = tuned for login flows
+    // (~65 MB RAM, ~2 iterations) — fast enough for UX, slow enough to resist brute force.
+    // Internally generates a random salt; no need to manage it separately.
+    if (crypto_pwhash_str(
+            hash,
+            password.c_str(),
+            password.size(),
+            crypto_pwhash_OPSLIMIT_INTERACTIVE,
+            crypto_pwhash_MEMLIMIT_INTERACTIVE) != 0) {
+        throw std::runtime_error("hashing failed (out of memory?)");
+    }
+
+    return std::string(hash);
+}
+
+bool TcpServer::verify_password(const std::string& password, const std::string& stored_hash)
+{
+    // crypto_pwhash_str_verify: extracts the salt and parameters embedded
+    // in stored_hash, re-hashes `password` with the same settings,
+    // and compares in constant time (prevents timing attacks).
+    // Returns 0 if the password matches, -1 otherwise.
+    return crypto_pwhash_str_verify(
+        stored_hash.c_str(),
+        password.c_str(),
+        password.size()
+    ) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// handle_new_connection
 // ---------------------------------------------------------------------------
 void TcpServer::handle_new_connection()
 {
     sockaddr_in client_addr{};
     socklen_t   len = sizeof(client_addr);
 
-    // accept() extracts the first queued connection and returns a new fd for it
+    // accept(): dequeues the first pending connection from the backlog
+    // and returns a new fd representing that specific client.
+    // client_addr is filled with the client's IP and ephemeral port.
     int new_fd = accept(server_fd, (sockaddr*)&client_addr, &len);
-    set_NonBlocking(new_fd);
     if (new_fd < 0) {
+        // EAGAIN/EWOULDBLOCK = no pending connections right now (normal with EPOLLET)
         perror("accept");
         return;
     }
 
-    // Enforce the MAX_CLIENTS cap: send an error and close immediately
-    // so the connecting client gets a clear rejection message
+    // Make the client socket non-blocking so recv()/send() return
+    // EAGAIN instead of blocking the event loop
+    set_NonBlocking(new_fd);
+
+    // Enforce connection cap — send a human-readable error before closing
+    // so the client knows why it was rejected
     if (static_cast<int>(clients.size()) >= MAX_CLIENTS) {
         const char* msg = "Error: server is full\n";
         send(new_fd, msg, strlen(msg), 0);
@@ -136,78 +209,81 @@ void TcpServer::handle_new_connection()
         return;
     }
 
-    // Register the new fd for read events and add to the client map
+    // Register the client fd for read events (level-triggered by default)
     add_to_epoll(new_fd, EPOLLIN);
 
+    // Initialize the client record
     clients[new_fd].fd           = new_fd;
-    clients[new_fd].ip_address   = inet_ntoa(client_addr.sin_addr); // store client IP as display name
-    clients[new_fd].port         = ntohs(client_addr.sin_port);      // store client source port (not used in current implementation)
-    clients[new_fd].username     = "";   // username is empty until /register or /login
+    clients[new_fd].ip_address   = inet_ntoa(client_addr.sin_addr); // binary → dotted-decimal
+    clients[new_fd].port         = ntohs(client_addr.sin_port);     // network → host byte order
+    clients[new_fd].username     = "";  // empty until /register or /login succeeds
     clients[new_fd].write_buffer = "";
 
-    std::cout << "Client connected fd=" << new_fd << ", IP=" << clients[new_fd].ip_address << ", Port=" << clients[new_fd].port << std::endl;
+    std::cout << "Client connected fd=" << new_fd
+              << ", IP=" << clients[new_fd].ip_address
+              << ", Port=" << clients[new_fd].port << std::endl;
 }
 
 // ---------------------------------------------------------------------------
-// Graceful shutdown trigger
+// Shutting_down
 // ---------------------------------------------------------------------------
 void TcpServer::Shutting_down()
 {
-    // Setting this flag causes the run() while-loop to exit on the next iteration
+    // The run() while loop checks this flag at the top of every iteration.
+    // Setting it false causes a clean exit after the current batch of events.
     SERVER_IS_RUNNING = false;
 }
 
 // ---------------------------------------------------------------------------
-// Credential persistence
+// save_credentials
 // ---------------------------------------------------------------------------
-void TcpServer::save_credentials(const std::string& username, const std::string& password, const std::string& ip_addr)
+void TcpServer::save_credentials(const std::string& username,
+                                  const std::string& password,
+                                  const std::string& ip_addr)
 {
     using json = nlohmann::json;
     json data;
 
-    // Attempt to read the existing credentials file
+    // Try to load existing credentials — if the file doesn't exist yet,
+    // we start with a fresh structure below
     std::ifstream infile("../DataBase/credentials.json");
-
     if (infile.is_open()) {
         try {
-            infile >> data;  // deserialize JSON from file
+            infile >> data;
         } catch (json::parse_error& e) {
-            // File is corrupt or empty — start fresh
+            // Corrupt or empty file — reset rather than propagating bad data
             std::cerr << "JSON parse error: " << e.what() << std::endl;
             data["users"] = json::array();
         }
         infile.close();
     } else {
-        // File doesn't exist yet — initialize structure
         data["users"] = json::array();
     }
 
-    // Safety check: ensure "users" key exists and is an array,
-    // even if the JSON had unexpected structure
+    // Defensive check: ensure the top-level structure is always valid
+    // even if the file had unexpected content
     if (!data.contains("users") || !data["users"].is_array()) {
         data["users"] = json::array();
     }
-    // Get current time
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm* tm_ptr = std::localtime(&t);
 
+    // Build a timestamp for the created_at field
+    auto now    = std::chrono::system_clock::now();
+    std::time_t t      = std::chrono::system_clock::to_time_t(now);
+    std::tm*    tm_ptr = std::localtime(&t);
 
-    // --- Option 2: Full timestamp "2025-02-26 14:35:22" ---
     std::ostringstream datetime_ss;
     datetime_ss << std::put_time(tm_ptr, "%Y-%m-%d %H:%M:%S");
-    std::string created_at = datetime_ss.str();  // "2025-03-05 14:35:22"
 
-    // Build the new user entry
+    // Build the new user entry — password is hashed before storage
     json user;
     user["username"]   = username;
-    user["password"]   = password;             // TODO: hash before storing (e.g. bcrypt)
+    user["password"]   = hash_password(password); // Argon2id hash, never plaintext
     user["IP_source"]  = ip_addr;
-    user["created_at"] = created_at;         // TODO: replace with real timestamp via <chrono>
+    user["created_at"] = datetime_ss.str();
 
     data["users"].push_back(user);
 
-    // Write back the updated JSON (pretty-printed with indent=4)
+    // Overwrite the file with the updated array (pretty-printed, indent=4)
     std::ofstream outfile("../DataBase/credentials.json");
     if (outfile.is_open()) {
         outfile << data.dump(4);
@@ -218,7 +294,11 @@ void TcpServer::save_credentials(const std::string& username, const std::string&
     }
 }
 
-bool TcpServer::verify_credentials(const std::string& username, const std::string& password)
+// ---------------------------------------------------------------------------
+// verify_credentials
+// ---------------------------------------------------------------------------
+bool TcpServer::verify_credentials(const std::string& username,
+                                    const std::string& password)
 {
     std::ifstream file("../DataBase/credentials.json");
     if (!file.is_open()) {
@@ -238,61 +318,86 @@ bool TcpServer::verify_credentials(const std::string& username, const std::strin
         return false;
 
     for (const auto& user : data["users"]) {
-        // Use different variable names to avoid shadowing the parameters
         const std::string stored_username = user["username"];
-        const std::string stored_password = user["password"];
+        const std::string stored_hash     = user["password"];
 
-        if (stored_username == username && stored_password == password)
-            return true; // match found — credentials are valid
+        // verify_password re-hashes the input with the salt embedded
+        // in stored_hash and compares in constant time
+        if (stored_username == username && verify_password(password, stored_hash))
+            return true;
     }
 
-    return false; // exhausted all users with no match
+    return false;
 }
 
 // ---------------------------------------------------------------------------
-// Main event loop
+// sendAll
+// ---------------------------------------------------------------------------
+int TcpServer::sendAll(int fd, const char* buff, int length)
+{
+    int total = 0;
+
+    // send() is not guaranteed to send all bytes in one call —
+    // especially on non-blocking sockets. Loop until everything is sent.
+    while (total < length) {
+        // buff + total: advance the pointer past already-sent bytes
+        // length - total: only request the remaining bytes
+        int n = send(fd, buff + total, length - total, 0);
+        if (n == -1) return -1; // EAGAIN or real error — caller decides what to do
+        total += n;
+    }
+
+    return 0; // all bytes delivered to the kernel send buffer
+}
+
+// ---------------------------------------------------------------------------
+// run — main event loop
 // ---------------------------------------------------------------------------
 void TcpServer::run()
 {
     initialize_epoll();
 
-    struct epoll_event events[MAX_EVENTS]; // buffer for events returned by epoll_wait
+    // Stack-allocated array of event structs — filled by epoll_wait each iteration
+    struct epoll_event events[MAX_EVENTS];
 
     std::cout << "Server running with epoll...\n";
 
     while (SERVER_IS_RUNNING)
     {
-        // Block for up to 1000 ms waiting for any registered fd to become ready.
-        // Timeout allows the loop to re-check SERVER_IS_RUNNING periodically.
+        // epoll_wait: block until at least one fd is ready, or 1000ms timeout.
+        // The timeout ensures the loop re-checks SERVER_IS_RUNNING periodically
+        // even when there's no network activity.
+        // Returns: number of ready fds, 0 on timeout, -1 on error.
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
 
         if (nfds < 0) {
-            if (errno == EINTR) continue; // interrupted by signal — just retry
+            if (errno == EINTR) continue; // signal interrupted the wait — harmless, retry
             std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
             break;
         }
 
-        if (nfds == 0) continue; // timeout with no events — loop back
+        if (nfds == 0) continue; // timeout — no events, loop back
 
         for (int i = 0; i < nfds; i++)
         {
-            int fd = events[i].data.fd;
+            int fd = events[i].data.fd; // which fd triggered this event
 
-            // ── New incoming connection ──────────────────────────────────────
+            // ── New incoming connection ──────────────────────────────────
             if (fd == server_fd) {
                 handle_new_connection();
                 continue;
             }
 
-            // ── Data from an existing client ────────────────────────────────
-            memset(buffer, 0, BUFFER_SIZE); // clear stale data before reading
+            // ── Existing client sent data ────────────────────────────────
+            memset(buffer, 0, BUFFER_SIZE); // clear stale bytes from previous iteration
 
-            // Read up to BUFFER_SIZE-1 bytes (leave room for null terminator)
+            // recv(): read up to BUFFER_SIZE-1 bytes, leaving room for '\0'
+            // On non-blocking fd, returns EAGAIN if no data is ready
             ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
 
             if (n <= 0) {
-                // n == 0: client closed connection gracefully
-                // n <  0: socket error
+                // n == 0: client sent FIN (graceful close)
+                // n <  0: recv error (ECONNRESET, etc.)
                 if (n == 0)
                     std::cout << "Client disconnected fd=" << fd << std::endl;
                 else
@@ -302,89 +407,88 @@ void TcpServer::run()
                 continue;
             }
 
-            // Detect whether the received data ends with a newline
-            // (used to decide if the message is complete)
+            // Check for a newline before trimming, because trim may remove it.
+            // A newline signals that this recv() completed a full message.
             bool has_newline = bufferEndsWith(buffer, n, "\n");
 
-            // Strip leading/trailing whitespace from the raw buffer
+            // Remove leading/trailing whitespace; returns adjusted length
             n = trimBuffer(buffer, n);
 
             // Ignore empty or whitespace-only messages
             if (isBufferEmpty(buffer, n)) continue;
 
-            // ── Authentication commands (/register or /login) ────────────────
+            // ── Authentication commands ──────────────────────────────────
+            // parse_credentials detects "/register user|pass" or "/login user|pass"
             temp_user_credentials temp;
             if (parse_credentials(buffer, temp))
             {
-                if (temp.cmd_type == 2) {
-                    // Registration: check for duplicate username first
+                if (temp.cmd_type == 2) { // /register
                     if (IsDuplicated_Username(temp.username.c_str())) {
                         const char* error_msg = "Error: username already taken\n";
                         send(fd, error_msg, strlen(error_msg), 0);
                         continue;
                     }
-                    // Persist credentials and acknowledge success
+                    // Hash and persist the new user; acknowledge success
                     save_credentials(temp.username, temp.password, clients[fd].ip_address);
                     std::string success_msg = "Registered " + temp.username + "\n";
                     send(fd, success_msg.c_str(), success_msg.size(), 0);
                 }
-                // TODO: cmd_type == 1 (login) — validate credentials against JSON
-                if(temp.cmd_type == 1) {
-                    // For now, just acknowledge the login attempt without validation
-                    if(verify_credentials(temp.username, temp.password)){
-                            std::string success_msg = "Login successful for " + temp.username + "\n";
-                            send(fd, success_msg.c_str(), success_msg.size(), 0);
-                        } else {
-                            const char* error_msg = "Error: invalid username or password\n";
-                            send(fd, error_msg, strlen(error_msg), 0);
-                            continue;
+
+                if (temp.cmd_type == 1) { // /login
+                    if (verify_credentials(temp.username, temp.password)) {
+                        std::string success_msg = "Login successful for " + temp.username + "\n";
+                        send(fd, success_msg.c_str(), success_msg.size(), 0);
+                    } else {
+                        const char* error_msg = "Error: invalid username or password\n";
+                        send(fd, error_msg, strlen(error_msg), 0);
+                        continue;
                     }
                 }
 
-                // Associate the username with this fd
+                // Bind the username to this connection for the session
                 clients[fd].username = temp.username;
                 clients[fd].write_buffer.clear();
-                usernames.insert(temp.username); // mark username as taken
+                usernames.insert(temp.username); // reserve the username slot
                 continue;
             }
 
-            // ── Reject unauthenticated chat messages ─────────────────────────
-            // A client must register/login before sending chat messages
+            // ── Guard: reject chat from unauthenticated clients ──────────
             if (clients[fd].username.empty()) {
                 const char* error_msg = "Error: please register first\n";
                 send(fd, error_msg, strlen(error_msg), 0);
                 continue;
             }
 
-            // ── Accumulate message chunks ────────────────────────────────────
-            // Messages may arrive in multiple recv() calls; buffer until '\n'
+            // ── Message reassembly ───────────────────────────────────────
+            // TCP is a stream protocol — a single logical message may arrive
+            // across multiple recv() calls. Accumulate chunks until '\n'.
             clients[fd].write_buffer += buffer;
 
-            if (!has_newline) continue; // message is incomplete — wait for more data
+            if (!has_newline) continue; // message incomplete, wait for more data
 
-            // Build the final broadcast message: "username: message\n"
+            // Complete message received — build the broadcast string
             std::string msg = clients[fd].username + ": " +
                               clients[fd].write_buffer + "\n";
 
-            clients[fd].write_buffer.clear(); // reset for next message
+            clients[fd].write_buffer.clear();
 
-            // ── Broadcast to all OTHER clients ───────────────────────────────
-            // Collect failing fds first to avoid iterator invalidation
-            // while erasing from the clients map mid-loop
+            // ── Broadcast to all other clients ───────────────────────────
+            // Collect fds that fail instead of disconnecting mid-iteration
+            // to avoid invalidating the clients map iterator
             std::vector<int> to_disconnect;
 
             for (auto& [client_fd, client_data] : clients)
             {
-                if (client_fd == fd) continue; // skip sender
+                if (client_fd == fd) continue; // don't echo back to sender
 
-                ssize_t sent = send(client_fd, msg.c_str(), msg.size(), 0);
-                if (sent <= 0) {
-                    perror("send");
-                    to_disconnect.push_back(client_fd); // mark for removal
+                ssize_t sent = sendAll(client_fd, msg.c_str(), msg.size());
+                if (sent == -1) {
+                    perror("sendAll");
+                    to_disconnect.push_back(client_fd);
                 }
             }
 
-            // Disconnect failed clients after the iteration is complete
+            // Safe to disconnect now that iteration is finished
             for (int disc_fd : to_disconnect) {
                 disconnect_client(disc_fd);
             }
@@ -397,41 +501,39 @@ void TcpServer::run()
 // ---------------------------------------------------------------------------
 TcpServer::~TcpServer()
 {
-    // Close all client sockets
+    // Close all active client sockets first
     for (auto& [fd, client] : clients) {
         close(fd);
     }
     clients.clear();
 
-    // Close control file descriptors
+    // Close the epoll instance and the listening socket
     if (epoll_fd >= 0) close(epoll_fd);
     if (server_fd >= 0) close(server_fd);
 
     std::cout << "Server shut down successfully" << std::endl;
 }
 
-
-
 // ---------------------------------------------------------------------------
-// Username uniqueness check
+// IsDuplicated_Username
 // ---------------------------------------------------------------------------
 bool TcpServer::IsDuplicated_Username(const char* new_username)
 {
-    // unordered_set::count is O(1) average — returns 1 if found, 0 otherwise
+    // unordered_set::count returns 1 if found, 0 if not — O(1) average
     return usernames.count(new_username) > 0;
 }
 
 // ---------------------------------------------------------------------------
-// Client disconnection
+// disconnect_client
 // ---------------------------------------------------------------------------
 void TcpServer::disconnect_client(int client_fd)
 {
-    remove_from_epoll(client_fd); // stop monitoring this fd
-    close(client_fd);             // release the OS file descriptor
+    remove_from_epoll(client_fd); // epoll stops watching this fd
+    close(client_fd);             // OS releases the file descriptor
 
     auto it = clients.find(client_fd);
     if (it != clients.end()) {
-        usernames.erase(it->second.username); // free the username slot
-        clients.erase(it);                    // remove from active client map
+        usernames.erase(it->second.username); // free the username so others can take it
+        clients.erase(it);                    // remove from the active client registry
     }
 }
