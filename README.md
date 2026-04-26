@@ -190,7 +190,6 @@ Example entry in `DataBase/credentials.json`:
 - No TLS/SSL — credentials and messages travel in plain text over the wire
 - `recv()` does not loop on `EAGAIN` in edge-triggered mode (partial read possible under high load)
 - Write buffering on `EAGAIN` from `send()` is not yet implemented
-- Maximum 7 simultaneous clients (`MAX_CLIENTS`)
 - No message history or scrollback
 - Single-threaded — one slow client operation can delay others
 
