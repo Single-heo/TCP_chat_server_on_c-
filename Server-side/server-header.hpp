@@ -43,7 +43,7 @@
 #define BUFFER_SIZE 1024               // Max bytes consumed per recv() call
 #define DUPLICATED_USERNAME_ERROR "101" // Protocol error code: username already taken
 #define MAX_EVENTS 10                  // Max events returned per epoll_wait() call
-#define MAX_CLIENTS 7                  // Hard cap on simultaneous connections
+
 
 class TcpServer {
 public:

@@ -200,15 +200,6 @@ void TcpServer::handle_new_connection()
     // EAGAIN instead of blocking the event loop
     set_NonBlocking(new_fd);
 
-    // Enforce connection cap — send a human-readable error before closing
-    // so the client knows why it was rejected
-    if (static_cast<int>(clients.size()) >= MAX_CLIENTS) {
-        const char* msg = "Error: server is full\n";
-        send(new_fd, msg, strlen(msg), 0);
-        close(new_fd);
-        return;
-    }
-
     // Register the client fd for read events (level-triggered by default)
     add_to_epoll(new_fd, EPOLLIN);
 
