@@ -57,12 +57,23 @@ A multi-client TCP chat server written in C++ using POSIX sockets, Linux `epoll`
 
 ### Dependencies
 
-```bash
-# Ubuntu / Debian
-sudo apt install libsodium-dev
+#### Debian/Ubuntu 
 
+<img width="20" height="22" alt="image" src="https://github.com/user-attachments/assets/0fa974f7-dcc4-4269-b083-3069af87e4c0"/>
+
+```bash
+
+sudo apt update
+sudo apt install libargon2-dev -y
+sudo apt install libsodium-dev -y
+```
+
+#### Arch
+<img width="20" height="20" alt="image" src="https://github.com/user-attachments/assets/e994402a-a449-4141-b55f-75ed3b83c308" />
+
+```bash
 # Arch
-sudo pacman -S libsodium
+sudo pacman -S base-devel cmake pkgconf libsodium argon2
 ```
 
 ### CMake (recommended)
