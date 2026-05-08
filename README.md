@@ -64,7 +64,7 @@ A multi-client TCP chat server written in C++ using POSIX sockets, Linux `epoll`
 ```bash
 
 sudo apt update
-sudo apt install libargon2-dev -y
+sudo apt install argon2-dev -y
 sudo apt install libsodium-dev -y
 ```
 
