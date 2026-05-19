@@ -159,7 +159,6 @@ Unknown commands beginning with `/` print a local error and are not forwarded to
 
 - `epoll`-based single-threaded event loop monitors the server socket and all client fds
 - Server socket and all client sockets are set to `O_NONBLOCK` via `fcntl()`
-- New connections are accepted in `handle_new_connection()` and rejected with an error message if `MAX_CLIENTS` (7) is reached
 - Auth commands (`/register`, `/login`) are parsed and dispatched before any chat message is processed
 - Unauthenticated clients receive an error if they attempt to send chat messages
 - Partial messages are accumulated per client in `write_buffer` until a `\n` is received, then broadcast via `sendAll()`
