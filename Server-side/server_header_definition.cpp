@@ -382,7 +382,7 @@ void TcpServer::run()
             // ── Existing client sent data ────────────────────────────────
             memset(buffer, 0, BUFFER_SIZE); // clear stale bytes from previous iteration
 
-            // recv(): read up to BUFFER_SIZE-1 bytes, leaving room for '\0'
+            // recv(): read up to BUFFER_SIZE-1 bytes, leaviwng room for '\0'
             // On non-blocking fd, returns EAGAIN if no data is ready
             ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
 
