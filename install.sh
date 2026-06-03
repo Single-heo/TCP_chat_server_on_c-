@@ -1,6 +1,16 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
-set -euo pipefail
+set -eu
+
+# Re-execute as root if necessary
+if [ "$(id -u)" -ne 0 ]; then
+    command -v sudo >/dev/null 2>&1 || {
+        echo "Error: Run this script as root "
+        exit 1
+    }
+
+    exec sudo "$0" "$@"
+fi
 
 TARGET="${1:-both}"
 
@@ -26,72 +36,63 @@ esac
 
 # Detect package manager
 if command -v apt >/dev/null 2>&1; then
-    PKG_MGR="apt"
+    PKG_MGR=apt
 elif command -v dnf >/dev/null 2>&1; then
-    PKG_MGR="dnf"
+    PKG_MGR=dnf
 elif command -v pacman >/dev/null 2>&1; then
-    PKG_MGR="pacman"
+    PKG_MGR=pacman
 elif command -v apk >/dev/null 2>&1; then
-    PKG_MGR="apk"
+    PKG_MGR=apk
 else
     echo "Unsupported package manager"
     exit 1
 fi
 
-install_packages() {
-    case "$PKG_MGR" in
-        apt)
-            sudo apt update
-            sudo apt install -y "$@"
-            ;;
-        dnf)
-            sudo dnf install -y "$@"
-            ;;
-        pacman)
-            sudo pacman -Sy --noconfirm "$@"
-            ;;
-        apk)
-            sudo apk add "$@"
-            ;;
-    esac
-}
-
-# Package names per distro
+# Install dependencies
 case "$PKG_MGR" in
     apt)
-        COMMON_PKGS=(cmake g++ pkg-config)
-        SERVER_PKGS=(libsodium-dev libargon2-dev)
+        apt update
+        apt install -y cmake g++ pkg-config
+
+        if [ "$BUILD_SERVER" = "ON" ]; then
+            apt install -y libsodium-dev libargon2-dev
+        fi
         ;;
     dnf)
-        COMMON_PKGS=(cmake gcc-c++ pkgconf-pkg-config)
-        SERVER_PKGS=(libsodium-devel argon2-devel)
+        dnf install -y cmake gcc-c++ pkgconf-pkg-config
+
+        if [ "$BUILD_SERVER" = "ON" ]; then
+            dnf install -y libsodium-devel argon2-devel
+        fi
         ;;
     pacman)
-        COMMON_PKGS=(cmake gcc pkgconf)
-        SERVER_PKGS=(libsodium argon2)
+        pacman -Sy --noconfirm cmake gcc pkgconf
+
+        if [ "$BUILD_SERVER" = "ON" ]; then
+            pacman -Sy --noconfirm libsodium argon2
+        fi
         ;;
     apk)
-        COMMON_PKGS=(cmake g++ pkgconf)
-        SERVER_PKGS=(libsodium-dev argon2-dev)
+        apk add cmake g++ pkgconf
+
+        if [ "$BUILD_SERVER" = "ON" ]; then
+            apk add libsodium-dev argon2-dev
+        fi
         ;;
 esac
 
-echo "[+] Installing common dependencies..."
-install_packages "${COMMON_PKGS[@]}"
-
-if [ "$BUILD_SERVER" = "ON" ]; then
-    echo "[+] Installing server dependencies..."
-    install_packages "${SERVER_PKGS[@]}"
-fi
-
-echo "[+] Configuring CMake..."
+echo "Configuring project..."
 
 cmake -B build \
     -DBUILD_CLIENT="$BUILD_CLIENT" \
     -DBUILD_SERVER="$BUILD_SERVER"
 
-echo "[+] Building..."
+echo "Building..."
 
-cmake --build build -j"$(nproc)"
+if command -v nproc >/dev/null 2>&1; then
+    cmake --build build -j"$(nproc)"
+else
+    cmake --build build
+fi
 
-echo "[+] Build completed"
+echo "Build completed."
