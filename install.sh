@@ -5,7 +5,7 @@ set -eu
 # Re-execute as root if necessary
 if [ "$(id -u)" -ne 0 ]; then
     command -v sudo >/dev/null 2>&1 || {
-        echo "Error: Run this script as root "
+        printf '\033[1;31mError: Please, run this script as root!\033[0m\n'
         exit 1
     }
 
@@ -52,7 +52,7 @@ fi
 case "$PKG_MGR" in
     apt)
         apt update
-        apt install -y cmake g++ pkg-config
+        apt install -y cmake g++ pkg-config build-essential
 
         if [ "$BUILD_SERVER" = "ON" ]; then
             apt install -y libsodium-dev libargon2-dev
@@ -60,20 +60,21 @@ case "$PKG_MGR" in
         ;;
     dnf)
         dnf install -y cmake gcc-c++ pkgconf-pkg-config
+        dnf groupinstall "Development Tools"
 
         if [ "$BUILD_SERVER" = "ON" ]; then
             dnf install -y libsodium-devel argon2-devel
         fi
         ;;
     pacman)
-        pacman -Sy --noconfirm cmake gcc pkgconf
+        pacman -Sy --noconfirm cmake gcc pkgconf base-devel
 
         if [ "$BUILD_SERVER" = "ON" ]; then
             pacman -Sy --noconfirm libsodium argon2
         fi
         ;;
     apk)
-        apk add cmake g++ pkgconf
+        apk add cmake g++ pkgconf build-base
 
         if [ "$BUILD_SERVER" = "ON" ]; then
             apk add libsodium-dev argon2-dev
