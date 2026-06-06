@@ -186,32 +186,32 @@ void TcpServer::handle_new_connection()
     sockaddr_in client_addr{};
     socklen_t   len = sizeof(client_addr);
 
-    // accept(): dequeues the first pending connection from the backlog
-    // and returns a new fd representing that specific client.
-    // client_addr is filled with the client's IP and ephemeral port.
     int new_fd = accept(server_fd, (sockaddr*)&client_addr, &len);
-    if (new_fd < 0) {
-        // EAGAIN/EWOULDBLOCK = no pending connections right now (normal with EPOLLET)
-        perror("accept");
-        return;
+    if (new_fd < 0) { perror("accept"); return; }
+
+    std::string new_ip = inet_ntoa(client_addr.sin_addr);
+
+    // ── IP duplicate check ───────────────────────────────────────────────
+    for (const auto& [fd, client] : clients) {
+        if (client.ip_address == new_ip) {
+            const char* msg = "[ERROR]: Your IP is already in use";
+            send(new_fd, msg, strlen(msg), 0);
+            close(new_fd);
+            return;
+        }
     }
-
-    // Make the client socket non-blocking so recv()/send() return
-    // EAGAIN instead of blocking the event loop
+ 
     set_NonBlocking(new_fd);
-
-    // Register the client fd for read events (level-triggered by default)
     add_to_epoll(new_fd, EPOLLIN);
 
-    // Initialize the client record
     clients[new_fd].fd           = new_fd;
-    clients[new_fd].ip_address   = inet_ntoa(client_addr.sin_addr); // binary → dotted-decimal
-    clients[new_fd].port         = ntohs(client_addr.sin_port);     // network → host byte order
-    clients[new_fd].username     = "";  // empty until /register or /login succeeds
+    clients[new_fd].ip_address   = new_ip;
+    clients[new_fd].port         = ntohs(client_addr.sin_port);
+    clients[new_fd].username     = "";
     clients[new_fd].write_buffer = "";
 
     std::cout << "Client connected fd=" << new_fd
-              << ", IP=" << clients[new_fd].ip_address
+              << ", IP=" << new_ip
               << ", Port=" << clients[new_fd].port << std::endl;
 }
 
@@ -275,7 +275,7 @@ void TcpServer::save_credentials(const std::string& username,
     data["users"].push_back(user);
 
     // Overwrite the file with the updated array (pretty-printed, indent=4)
-    std::ofstream outfile("../DataBase/credentials.json");
+    std::ofstream outfile("/var/lib/tcpserver/credentials.json");
     if (outfile.is_open()) {
         outfile << data.dump(4);
         outfile.close();

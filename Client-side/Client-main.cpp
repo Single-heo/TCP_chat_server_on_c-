@@ -142,9 +142,10 @@ int TcpClient::connect_and_authenticate(const char* server_ipv4_address)
             std::cout << "\n✓ Login successful!\n";
             username = creds.username; // store for use in the chat loop
         }
-        else if (strncmp(response, "Error:", 6) == 0) {
+        else if (strncmp(response, "[ERROR]: ", 9) == 0) {
+            system("clear");
             std::cerr << "\n✗ " << response;
-            std::cerr << "Authentication failed. Please restart the client and try again.\n";
+            std::cerr <<  BOLD << RED << "\n[ERROR]: " << NC << "Authentication failed. Please restart the client and try again.\n";
             exit(1);
         }
     } else {
