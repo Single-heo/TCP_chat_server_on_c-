@@ -34,11 +34,11 @@
 #include <unordered_set>
 #include <string>
 // nlohmann/json: header-only JSON library for credential persistence
-#include "common/nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
 
 // Shared utilities: bufferEndsWith, trimBuffer, isBufferEmpty,
 // parse_credentials, getString, getInt, etc.
-#include "../common/input.hpp"
+#include <input.hpp>
 
 #define BUFFER_SIZE 1024                // Max bytes consumed per recv() call
 #define DUPLICATED_USERNAME_ERROR "101" // Protocol error code: username already taken

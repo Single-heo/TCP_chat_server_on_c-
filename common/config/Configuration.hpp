@@ -2,7 +2,7 @@
 
 #include <string>
 #define SI_NO_CONVERSION
-#include <SimpleIni.h>
+#include <simpleini/SimpleIni.h>
 
 struct ServerConfig {
     std::string address; 
