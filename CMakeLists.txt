@@ -41,7 +41,7 @@ ${PROJECT_SOURCE_DIR}/common
 
 if(BUILD_CLIENT)
 
-```
+
 add_executable(client
     Client-side/Client-main.cpp
 )
@@ -50,7 +50,7 @@ target_link_libraries(client
     PRIVATE
         common
 )
-```
+
 
 endif()
 
@@ -62,7 +62,7 @@ endif()
 
 if(BUILD_SERVER)
 
-```
+
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
 add_executable(server
@@ -75,6 +75,6 @@ target_link_libraries(server
         common
         PkgConfig::SODIUM
 )
-```
+
 
 endif()
