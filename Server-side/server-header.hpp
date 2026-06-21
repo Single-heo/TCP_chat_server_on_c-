@@ -34,7 +34,7 @@
 #include <unordered_set>
 #include <string>
 // nlohmann/json: header-only JSON library for credential persistence
-#include <nlohmann/json.hpp>
+#include "common/nlohmann/json.hpp"
 
 // Shared utilities: bufferEndsWith, trimBuffer, isBufferEmpty,
 // parse_credentials, getString, getInt, etc.
