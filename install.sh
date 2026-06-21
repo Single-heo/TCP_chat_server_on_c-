@@ -144,7 +144,8 @@ case "$PKG_MGR" in
         if [ "$BUILD_SERVER" = "ON" ]; then
             apt-get install -y \
                 libsodium-dev \
-                libargon2-dev
+                libargon2-dev \
+                libsimpleini-dev
         fi
         ;;
     dnf)
@@ -158,7 +159,8 @@ case "$PKG_MGR" in
         if [ "$BUILD_SERVER" = "ON" ]; then
             dnf install -y \
                 libsodium-devel \
-                argon2-devel
+                argon2-devel \
+                simpleini-devel
         fi
         ;;
     pacman)
@@ -173,7 +175,8 @@ case "$PKG_MGR" in
         if [ "$BUILD_SERVER" = "ON" ]; then
             pacman -S --noconfirm \
                 libsodium \
-                argon2
+                argon2 \
+                simpleini
         fi
         ;;
     apk)
@@ -181,12 +184,17 @@ case "$PKG_MGR" in
             cmake \
             g++ \
             pkgconf \
-            build-base
+            build-base \
+            git
 
         if [ "$BUILD_SERVER" = "ON" ]; then
             apk add \
                 libsodium-dev \
                 argon2-dev
+            sudo mkdir -p /usr/include/simpleini \
+            git clone https://github.com/brofield/simpleini.git \
+            cd simpleini \
+            cp SimpleIni.h /usr/include/simpleini/
         fi
         ;;
 esac
