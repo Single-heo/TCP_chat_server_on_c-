@@ -1,42 +1,74 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
+
 project(TCPChatApp VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-include_directories(${CMAKE_SOURCE_DIR}/common)
+add_compile_options(
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+option(BUILD_CLIENT "Build client" ON)
+option(BUILD_SERVER "Build server" ON)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
 
-# Build options
-option(BUILD_CLIENT "Build client component" ON)
-option(BUILD_SERVER "Build server component" ON)
-
-# Ensure at least one target is selected
-if(NOT BUILD_CLIENT AND NOT BUILD_SERVER)
-    message(FATAL_ERROR "At least one of BUILD_CLIENT or BUILD_SERVER must be ON")
+if(BUILD_SERVER)
+    pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    # Swapped find_package for pkg_check_modules to locate the package correctly
+    pkg_check_modules(SIMPLEINI REQUIRED IMPORTED_TARGET simpleini)
 endif()
 
+#
+# Common library
+#
+
+add_library(common STATIC
+    common/Logger/logger.cpp
+)
+
+target_include_directories(common
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}
+)
+
+#
 # Client
+#
+
 if(BUILD_CLIENT)
-    include_directories(${CMAKE_SOURCE_DIR}/Client-side)
 
     add_executable(client
         Client-side/Client-main.cpp
     )
+
+    target_link_libraries(client
+        PRIVATE
+            common
+    )
+
 endif()
 
+#
 # Server
-if(BUILD_SERVER AND EXISTS "${CMAKE_SOURCE_DIR}/Server-side")
-    include_directories(${CMAKE_SOURCE_DIR}/Server-side)
+#
+
+if(BUILD_SERVER)
 
     add_executable(server
         Server-side/Server_main.cpp
         Server-side/server_header_definition.cpp
     )
 
-    target_include_directories(server PRIVATE ${SODIUM_INCLUDE_DIRS})
-    target_link_libraries(server ${SODIUM_LIBRARIES})
+    target_link_libraries(server
+        PRIVATE
+            common
+            PkgConfig::SODIUM
+            PkgConfig::SIMPLEINI  # Links the imported pkg-config target safely
+    )
+
 endif()

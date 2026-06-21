@@ -4,7 +4,7 @@
 #include <ifaddrs.h>     // getifaddrs(), freeifaddrs() — enumerate network interfaces
 #include <arpa/inet.h>   // inet_ntop() — convert binary IP to string
 #include <cstring>       // memset(), strerror()
-
+#include "common/Logger/logger.hpp"
 #include "server-header.hpp"
 
 // volatile: prevents the compiler from optimizing away reads of this variable,
@@ -18,26 +18,19 @@ bool isLocalIP(const std::string& ip);
 
 int main()
 {
-    // Prompt the operator for which local IP to bind the server to.
-    // getString() with StringType::IPV4 rejects anything that isn't a
-    // valid dotted-decimal IPv4 address before returning.
-    std::string ip_addr = getString("Type the ip address: ", true, false, StringType::IPV4);
-
-    // Prompt for port number; getInt enforces the valid TCP port range [0, 65535].
-    int port = getInt("Type the port: ", 0, 65535);
-
-    // Security check: refuse to bind to an IP that doesn't belong to this machine.
-    // "0.0.0.0" is the wildcard address (bind on all interfaces), so it's always allowed.
-    // Binding to a foreign IP would fail at bind() anyway, but this gives a clearer error.
-    if (!isLocalIP(ip_addr) && ip_addr != "0.0.0.0") {
-        std::cerr << "Error: IP is not assigned to this machine.\n";
-        return 1;
+    // Load configuration from file
+    ServerConfig config;
+    if (!config.Load("/etc/tcpserver/Config_file.ini")) {
+        std::cerr << "Failed to load configuration file" << std::endl;
+        return EXIT_FAILURE;
     }
+    Logger logger(config);
+
 
     // Construct the server: internally calls socket(), setsockopt(), bind(), listen()
-    TcpServer server(port, ip_addr.c_str());
+    TcpServer server(config.port, config.address.c_str());
 
-    std::cout << "Server starting...\n";
+    logger.Write_log("Server started on " + config.address + ":" + std::to_string(config.port), Logger::Info);
 
     // Enter the epoll event loop — blocks here until SERVER_IS_RUNNING becomes false
     server.run();

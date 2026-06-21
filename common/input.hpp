@@ -4,6 +4,7 @@
 #include <regex>
 #include <cctype>
 #include <cstring>
+#include <termios.h>
 
 #pragma once
 
@@ -321,6 +322,7 @@ inline std::string getString(const std::string& prompt,
 /**
  * Reads a yes/no response from stdin.
  * @param prompt Message to display (automatically appends " (y/n): ")
+ * Returns appropriate error message for validation type.
  * @return true for yes/y, false for no/n (case-insensitive)
  */
 inline bool getYesNo(const std::string& prompt)

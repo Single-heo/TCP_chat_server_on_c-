@@ -10,8 +10,6 @@
 #include <algorithm>
 #include <limits>        // std::numeric_limits (used in getInt and clearInput)
 #include <stdexcept>     // std::runtime_error
-
-// Shared input utilities (getString, bufferEndsWith, StringType, etc.)
 #include "../common/input.hpp"
 
 #define BUFFER_SIZE 1024

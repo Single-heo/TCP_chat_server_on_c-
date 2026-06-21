@@ -2,105 +2,163 @@
 
 set -eu
 
-# Colors
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-BOLD='\033[1m'
+# ============================
+# Safety / environment
+# ============================
+umask 022
 
-log_info() {
-    printf "${BOLD}${GREEN}%s${NC}\n" "$1"
-}
+# ============================
+# Colors (safe POSIX)
+# ============================
+RED="$(printf '\033[1;31m')"
+GREEN="$(printf '\033[1;32m')"
+YELLOW="$(printf '\033[1;33m')"
+BOLD="$(printf '\033[1m')"
+NC="$(printf '\033[0m')"
 
-log_error() {
-    printf "${BOLD}${RED}%s${NC}\n" "$1" >&2
-}
+log_info()  { printf "%s%s%s\n" "$BOLD$GREEN" "$1" "$NC"; }
+log_warn()  { printf "%s%s%s\n" "$BOLD$YELLOW" "$1" "$NC"; }
+log_error() { printf "%s%s%s\n" "$BOLD$RED" "$1" "$NC" >&2; }
 
-# Re-execute as root if necessary
+# ============================
+# Root escalation
+# ============================
 if [ "$(id -u)" -ne 0 ]; then
     if command -v sudo >/dev/null 2>&1; then
-        exec sudo "$0" "$@"
+        SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf "%s" "$0")"
+        exec sudo "$SCRIPT_PATH" "$@"
     fi
 
-    log_error "Please run this script as root or install sudo."
+    log_error "Root required (no sudo available)."
     exit 1
 fi
 
+# ============================
+# Build target
+# ============================
 TARGET="${1:-both}"
 
 BUILD_CLIENT=OFF
 BUILD_SERVER=OFF
 
 case "$TARGET" in
-    client)
-        BUILD_CLIENT=ON
-        ;;
-    server)
-        BUILD_SERVER=ON
-        ;;
-    both)
-        BUILD_CLIENT=ON
-        BUILD_SERVER=ON
-        ;;
+    client) BUILD_CLIENT=ON ;;
+    server) BUILD_SERVER=ON ;;
+    both)   BUILD_CLIENT=ON; BUILD_SERVER=ON ;;
     *)
-        printf 'Usage: %s {client|server|both}\n' "$0" >&2
+        printf "Usage: %s {client|server|both}\n" "$0" >&2
         exit 1
         ;;
 esac
 
-log_info "Installing configuration file..."
+# ============================
+# Paths (consistent lowercase)
+# ============================
+CONFIG_DIR="/etc/tcpserver"
+DATA_DIR="/var/lib/tcpserver"
+LOG_DIR="/var/log/tcpserver"
 
-mkdir -p /etc/TcpServer
-mkdir -p /var/lib/tcpserver
+CONFIG_FILE="$CONFIG_DIR/Config_file.ini"
+DB_FILE="$DATA_DIR/credentials.json"
+LOG_FILE="$LOG_DIR/log.txt"
 
-if [ -f common/Config_file.ini ]; then
-    install -m 644 common/Config_file.ini \
-        /etc/TcpServer/Config_file.ini
+# ============================
+# Setup directories
+# ============================
+log_info "Creating system directories..."
+
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+
+if [ ! -f "$LOG_FILE" ]; then
+    : > "$LOG_FILE"
+else
+    log_info "Existing log file detected."
 fi
 
+# ============================
+# Install config files
+# ============================
+log_info "Installing configuration files..."
 
-if [ -f DataBase/credentials.json ] &&
-   [ ! -f /var/lib/tcpserver/credentials.json ]; then
-    install -m 644 DataBase/credentials.json \
-        /var/lib/tcpserver/credentials.json
+if [ -f "./common/Config_file.ini" ]; then
+    # FIX: Only install if the target file does not exist yet
+    if [ ! -f "$CONFIG_FILE" ]; then
+        install -m 644 "./common/Config_file.ini" "$CONFIG_FILE"
+    else
+        log_info "Existing configuration file detected. Skipping overwrite."
+    fi
+else
+    log_warn "Missing: common/Config_file.ini"
 fi
 
-log_info "Config file location: /etc/TcpServer/Config_file.ini"
-sleep 0.4
-log_info "Database location:  /var/lib/tcpserver/credentials.json"
+if [ -f "./DataBase/credentials.json" ]; then
+    if [ ! -f "$DB_FILE" ]; then
+        install -m 644 "./DataBase/credentials.json" "$DB_FILE"
+    else
+        log_info "Database already installed."
+    fi
+else
+    log_warn "Missing: DataBase/credentials.json"
+fi
 
-# Detect package manager
-if command -v apt >/dev/null 2>&1; then
-    PKG_MGR=apt
+printf "\n"
+log_info "Config: $CONFIG_FILE"
+log_info "DB:     $DB_FILE"
+log_info "Log:    $LOG_FILE"
+printf "\n"
+
+# ============================
+# Package manager detection
+# ============================
+PKG_MGR=""
+
+if command -v apt-get >/dev/null 2>&1; then
+    PKG_MGR="apt"
 elif command -v dnf >/dev/null 2>&1; then
-    PKG_MGR=dnf
+    PKG_MGR="dnf"
 elif command -v pacman >/dev/null 2>&1; then
-    PKG_MGR=pacman
+    PKG_MGR="pacman"
 elif command -v apk >/dev/null 2>&1; then
-    PKG_MGR=apk
+    PKG_MGR="apk"
 else
     log_error "Unsupported package manager."
     exit 1
 fi
 
+log_info "Package manager: $PKG_MGR"
+
+# ============================
+# Dependencies
+# ============================
 log_info "Installing dependencies..."
 
 case "$PKG_MGR" in
     apt)
-        apt update
-        apt install -y cmake g++ pkg-config build-essential
+        apt-get update
+        apt-get install -y \
+            cmake \
+            g++ \
+            pkg-config \
+            build-essential
 
         if [ "$BUILD_SERVER" = "ON" ]; then
-            apt install -y libsodium-dev libargon2-dev
+            apt-get install -y \
+                libsodium-dev \
+                libargon2-dev
         fi
         ;;
     dnf)
-        dnf install -y cmake gcc-c++ pkgconf-pkg-config
+        dnf install -y \
+            cmake \
+            gcc-c++ \
+            pkgconf-pkg-config
+
         dnf groupinstall -y "Development Tools"
 
         if [ "$BUILD_SERVER" = "ON" ]; then
-            dnf install -y libsodium-devel argon2-devel
+            dnf install -y \
+                libsodium-devel \
+                argon2-devel
         fi
         ;;
     pacman)
@@ -133,34 +191,36 @@ case "$PKG_MGR" in
         ;;
 esac
 
-log_info "Configuring project..."
+# ============================
+# Configure build
+# ============================
+log_info "Configuring CMake project..."
 
-cmake -B build \
+cmake -S . -B build \
     -DBUILD_CLIENT="$BUILD_CLIENT" \
     -DBUILD_SERVER="$BUILD_SERVER"
 
-log_info "Building project..."
+# ============================
+# Build
+# ============================
+log_info "Building..."
 
+JOBS=""
 if command -v nproc >/dev/null 2>&1; then
-    cmake --build build -j"$(nproc)"
-else
-    cmake --build build
+    JOBS="-j$(nproc)"
 fi
 
-if command -v clear >/dev/null 2>&1; then
-    clear
-fi
+cmake --build build -- $JOBS
 
+# ============================
+# Done
+# ============================
 printf "\n"
 log_info "Build completed."
 
-printf "${BOLD}Executables are located in:${NC}\n"
-printf "  build/\n\n"
+printf "%sArtifacts:%s\n" "$BOLD" "$NC"
 
-if [ "$BUILD_SERVER" = "ON" ]; then
-    printf "  ${YELLOW}./server${NC}\n"
-fi
+[ "$BUILD_SERVER" = "ON" ] && printf "  build/server\n"
+[ "$BUILD_CLIENT" = "ON" ] && printf "  build/client\n"
 
-if [ "$BUILD_CLIENT" = "ON" ]; then
-    printf "  ${YELLOW}./client${NC}\n"
-fi
+printf "\n"
