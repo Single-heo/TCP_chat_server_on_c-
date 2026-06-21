@@ -16,6 +16,7 @@ option(BUILD_CLIENT "Build client" ON)
 option(BUILD_SERVER "Build server" ON)
 
 find_package(PkgConfig REQUIRED)
+find_package(simpleini REQUIRED)
 
 if(BUILD_SERVER)
     pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)

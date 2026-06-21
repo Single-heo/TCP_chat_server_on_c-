@@ -190,7 +190,8 @@ case "$PKG_MGR" in
         if [ "$BUILD_SERVER" = "ON" ]; then
             apk add \
                 libsodium-dev \
-                argon2-dev
+                argon2-dev \
+                nlohmann-json
             sudo mkdir -p /usr/include/simpleini \
             git clone https://github.com/brofield/simpleini.git \
             cd simpleini \
