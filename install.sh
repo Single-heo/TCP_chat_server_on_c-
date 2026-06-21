@@ -145,7 +145,8 @@ case "$PKG_MGR" in
             apt-get install -y \
                 libsodium-dev \
                 libargon2-dev \
-                libsimpleini-dev
+                libsimpleini-dev \
+                nlohmann-json3-dev
         fi
         ;;
     dnf)
@@ -160,7 +161,8 @@ case "$PKG_MGR" in
             dnf install -y \
                 libsodium-devel \
                 argon2-devel \
-                simpleini-devel
+                simpleini-devel \
+                nlohmann-json-devel
         fi
         ;;
     pacman)
@@ -176,7 +178,8 @@ case "$PKG_MGR" in
             pacman -S --noconfirm \
                 libsodium \
                 argon2 \
-                simpleini
+                simpleini \
+                nlohmann-json
         fi
         ;;
     apk)
@@ -192,10 +195,6 @@ case "$PKG_MGR" in
                 libsodium-dev \
                 argon2-dev \
                 nlohmann-json
-            sudo mkdir -p /usr/include/simpleini \
-            git clone https://github.com/brofield/simpleini.git \
-            cd simpleini \
-            cp SimpleIni.h /usr/include/simpleini/
         fi
         ;;
 esac
