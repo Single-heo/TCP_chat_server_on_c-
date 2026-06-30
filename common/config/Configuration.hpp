@@ -1,26 +1,31 @@
 #pragma once
 
 #include <string>
-#define SI_NO_CONVERSION
+#define SI_NO_CONVERSION                 // Disable SimpleIni Unicode conversion layer
 #include <simpleini/SimpleIni.h>
 
+// Holds every runtime setting parsed from the .ini config file.
 struct ServerConfig {
-    std::string address; 
-    std::string LogPath;
-    std::string DatabasePath;
-    int port;
-    int maxConnections;
-    int timeout;
-    bool Run_without_logging{false};
+    std::string address;       // Bind/listen IP address
+    std::string LogPath;       // Destination file for log output
+    std::string DatabasePath;  // Path to the credentials JSON store
+    std::string PidFilePath;   // PID file path (daemon tracking)
+    int port;                  // Listen port
+    int maxConnections;        // listen() backlog / global cap
+    int timeout;               // Connection idle timeout (seconds)
+    bool Run_without_logging{false}; // true → skip file logging (journald only)
 
+    // Parses `file`; returns false if the .ini can't be loaded.
+    // Every GetValue call supplies a default, so missing keys are non-fatal.
     bool Load(const char* file) {
         CSimpleIniA ini;
 
         if (ini.LoadFile(file) < 0)
-            return false;
+            return false; // File missing / unreadable
 
+        // ---- [NETWORK] ----
         address =
-            ini.GetValue("NETWORK", "listen_address", "0.0.0.0");
+            ini.GetValue("NETWORK", "listen_address", "127.0.0.1");
 
         port =
             (int)ini.GetLongValue("NETWORK", "listen_port", 25565);
@@ -31,13 +36,20 @@ struct ServerConfig {
         timeout =
             (int)ini.GetLongValue("NETWORK", "connection_timeout", 150);
 
-        LogPath = 
-            ini.GetValue("LOGS", "LogPath", "/var/log/tcpserver/log.txt" );
+        // ---- [LOGS] ----
+        LogPath =
+            ini.GetValue("LOGS", "LogPath", "/var/log/tcpserver/log.txt");
 
-        DatabasePath = 
+        // ---- [DATABASE] ----
+        DatabasePath =
             ini.GetValue("DATABASE", "DatabasePath", "/var/lib/tcpserver/credentials.json");
 
-        Run_without_logging = 
+        // ---- [PID] ----
+        PidFilePath =
+            ini.GetValue("PID", "PidFilePath", "/run/tcpserver/server.pid");
+
+        // ---- [LOGS] toggle ----
+        Run_without_logging =
             (bool)ini.GetBoolValue("LOGS", "Run_Without_loggin", false);
 
         return true;

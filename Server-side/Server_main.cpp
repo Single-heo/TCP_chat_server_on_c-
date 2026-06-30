@@ -1,53 +1,85 @@
-#include <csignal>       // sig_atomic_t (volatile signal-safe flag type)
-#include <cstdlib>       // exit(), EXIT_FAILURE
+#include <csignal>       // std::signal
+#include <cstdlib>       // EXIT_FAILURE
 #include <iostream>      // std::cout, std::cerr
-#include <ifaddrs.h>     // getifaddrs(), freeifaddrs() — enumerate network interfaces
-#include <arpa/inet.h>   // inet_ntop() — convert binary IP to string
+#include <ifaddrs.h>     // getifaddrs(), freeifaddrs()
+#include <arpa/inet.h>   // inet_ntop()
 #include <cstring>       // memset(), strerror()
+#include <atomic>        // std::atomic
+#include <memory>        // std::unique_ptr
 #include "common/Logger/logger.hpp"
 #include "server-header.hpp"
 
-// volatile: prevents the compiler from optimizing away reads of this variable,
-// since it can be modified asynchronously by a signal handler.
-// sig_atomic_t: guarantees the read/write is atomic from a signal context.
-// (not currently wired to a signal handler, but good practice for future use)
-volatile sig_atomic_t server_running = 1;
+// Global atomic pointer so the signal handler can safely reach the server.
+std::atomic<TcpServer*> g_server_instance{nullptr};
 
-// Forward declaration — defined below main()
+// Async-signal-safe handler: ONLY publishes the intent to stop.
+// No maps, no close(), no logging — just an atomic store inside requestShutdown().
+void handle_shutdown_signal(int signum) {
+    if (signum == SIGTERM || signum == SIGINT) {
+        TcpServer* server = g_server_instance.load();
+        if (server) {
+            server->requestShutdown(); // only does SERVER_IS_RUNNING.store(false)
+        }
+    }
+}
+
+// Forward declaration — defined below main.
 bool isLocalIP(const std::string& ip);
 
 int main()
 {
-    // Load configuration from file
     ServerConfig config;
     if (!config.Load("/etc/tcpserver/Config_file.ini")) {
-        std::cerr << "Failed to load configuration file" << std::endl;
+        std::cerr << "Failed to load configuration file." << std::endl;
         return EXIT_FAILURE;
     }
     Logger logger(config);
 
+    if (isLocalIP(config.address))
+    {
+        std::unique_ptr<TcpServer> server =
+            std::make_unique<TcpServer>(
+                config.port,
+                config.address.c_str(),
+                &logger
+            );
 
-    // Construct the server: internally calls socket(), setsockopt(), bind(), listen()
-    TcpServer server(config.port, config.address.c_str());
+        // Publish pointer BEFORE registering handlers.
+        g_server_instance.store(server.get());
 
-    logger.Write_log("Server started on " + config.address + ":" + std::to_string(config.port), Logger::Info);
+        std::signal(SIGTERM, handle_shutdown_signal); // systemd stop
+        std::signal(SIGINT,  handle_shutdown_signal); // Ctrl+C
+        std::signal(SIGPIPE, SIG_IGN);                // ignore broken pipe
 
-    // Enter the epoll event loop — blocks here until SERVER_IS_RUNNING becomes false
-    server.run();
+        logger.Write_log("Server started on " + config.address + ":" + std::to_string(config.port), Logger::Info);
 
-    return 0;
+        // Blocks until the flag flips; teardown now happens inside run().
+        server->run();
+
+        // Unpublish before the unique_ptr destroys the instance.
+        g_server_instance.store(nullptr);
+
+        logger.Write_log("Server stopped gracefully.", Logger::Info);
+        return 0;
+    }
+    else
+    {
+        std::cerr << BOLD << RED << "[ERROR]:" << NC
+                  << " The specified listen address (" << config.address
+                  << ") is not assigned to any local network interface on this machine."
+                     " Please use a valid local IP address." << std::endl;
+        logger.Write_log("Invalid listen address: " + config.address, Logger::Error);
+        return EXIT_FAILURE;
+    }
 }
 
 // ---------------------------------------------------------------------------
-// isLocalIP: checks whether the given IP string is assigned to any local
-// network interface on this machine.
+// isLocalIP: checks whether the given IP is assigned to a local interface.
 // ---------------------------------------------------------------------------
 bool isLocalIP(const std::string& ip)
 {
     struct ifaddrs *ifaddr, *ifa;
 
-    // getifaddrs() allocates and fills a linked list of all network interfaces.
-    // Each node contains the interface name, address family, and address.
     if (getifaddrs(&ifaddr) == -1) {
         perror("getifaddrs");
         return false;
@@ -55,34 +87,23 @@ bool isLocalIP(const std::string& ip)
 
     bool found = false;
 
-    // Walk the linked list; ifa->ifa_next is nullptr at the end
     for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
     {
-        // Some interfaces (e.g. loopback aliases) may have no address — skip them
         if (!ifa->ifa_addr) continue;
 
-        // We only care about IPv4 addresses (AF_INET).
-        // AF_INET6 would be needed for IPv6 support.
         if (ifa->ifa_addr->sa_family == AF_INET)
         {
-            char addr[INET_ADDRSTRLEN]; // INET_ADDRSTRLEN = 16 (enough for "255.255.255.255\0")
-
-            // Cast the generic sockaddr* to sockaddr_in* to access sin_addr,
-            // then use inet_ntop to convert the binary address to a human-readable string.
-            // inet_ntop is safer than the older inet_ntoa (thread-safe, no static buffer).
+            char addr[INET_ADDRSTRLEN];
             void* in_addr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
             inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN);
 
-            // Compare the interface's string IP against what the user typed
             if (ip == addr) {
                 found = true;
-                break; // no need to keep iterating
+                break;
             }
         }
     }
 
-    // freeifaddrs() releases the linked list allocated by getifaddrs() —
-    // must always be called to avoid a memory leak
     freeifaddrs(ifaddr);
     return found;
 }

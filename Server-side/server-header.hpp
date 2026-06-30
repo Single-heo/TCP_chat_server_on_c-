@@ -1,5 +1,7 @@
 #pragma once
 
+// std::atomic<bool> — async-signal-safe flag
+#include <atomic>   
 // libsodium: crypto primitives (Argon2id hashing + future encryption)
 #include <sodium.h>
 // The logging system
@@ -51,7 +53,7 @@ class TcpServer {
 public:
     // Creates the listening socket, sets SO_REUSEADDR, binds to
     // ipv4_address:_port, and calls listen(). Throws on failure.
-    TcpServer(int _port = 25565, const char* ipv4_address = "127.0.0.1");
+    TcpServer(int _port = 25565, const char* ipv4_address = "127.0.0.1", Logger* _logger = nullptr);
 
     // Closes all client fds, the epoll fd, and the server fd
     ~TcpServer();
@@ -84,10 +86,7 @@ public:
     void remove_from_epoll(int fd);
 
     // Accepts pending connections on server_fd (ET-safe loop).
-    void handle_new_connection(Logger& log);
-
-    // Sets SERVER_IS_RUNNING = false, causing run() to exit.
-    void Shutting_down();
+    void handle_new_connection(Logger* logger);
 
     // Appends a new user with hashed password + timestamp. Atomic write.
     // Returns true on success.
@@ -129,12 +128,20 @@ public:
     // Primary client registry: maps socket fd → Client struct.
     std::unordered_map<int, Client> clients;
 
+    void shutdownActiveClients();
+
+    void Shutdown();
+
+    void requestShutdown() noexcept { SERVER_IS_RUNNING.store(false); }
+
 private:
+    Logger* logger{nullptr}; // Pointer to the logger instance
     // Processes one complete (newline-terminated) message for a given fd.
     // Returns false if the client was disconnected during processing.
     bool process_message(int fd, const std::string& raw, Logger& log);
 
-    bool SERVER_IS_RUNNING{true}; // Loop control; set false by Shutting_down()
+    // Loop control. atomic<bool> so a signal handler can store(false) safely.
+    std::atomic<bool> SERVER_IS_RUNNING{true};
     char buffer[BUFFER_SIZE]{};   // Reusable recv buffer
     int server_fd{-1};            // The listening socket fd
     int epoll_fd{-1};             // The epoll instance fd
