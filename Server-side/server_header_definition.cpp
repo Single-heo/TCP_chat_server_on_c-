@@ -10,17 +10,23 @@
 
 // ============================================================================
 // Constructor — builds and arms the listening socket end-to-end.
+// Performs, in order: libsodium init, signal setup, socket creation,
+// non-blocking + reuse-addr config, bind, and listen.
+// Throws std::runtime_error on any unrecoverable failure.
 // ============================================================================
 TcpServer::TcpServer(int _port, const char* ipv4_address, Logger* _logger)
 {
     logger = _logger; // Store non-owning logger pointer (may be null)
 
     // Initialize libsodium ONCE for the whole process lifetime.
+    // Must succeed before any crypto_pwhash_* call is used later.
     if (sodium_init() < 0) {
         throw std::runtime_error("libsodium initialization failed");
     }
 
     // Ignore SIGPIPE so writing to a closed peer socket won't kill us.
+    // Without this, send() to a dead peer raises SIGPIPE and terminates
+    // the process by default; we prefer to handle it via the EPIPE errno.
     signal(SIGPIPE, SIG_IGN);
 
     std::cout << "Starting TCP server on " << ipv4_address << ":" << _port << "...\n";
@@ -38,6 +44,7 @@ TcpServer::TcpServer(int _port, const char* ipv4_address, Logger* _logger)
     // SO_REUSEADDR: allows fast rebind after restart (skips TIME_WAIT block).
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        // Non-fatal: server can still run, just may fail to rebind quickly.
         std::cerr << "setsockopt(SO_REUSEADDR) failed: " << strerror(errno) << std::endl;
     }
 
@@ -68,6 +75,7 @@ TcpServer::TcpServer(int _port, const char* ipv4_address, Logger* _logger)
 
 // ============================================================================
 // Destructor — releases all OS resources in safe order.
+// Guarantees no fd leaks even if Shutdown()/run() was never called.
 // ============================================================================
 TcpServer::~TcpServer()
 {
@@ -76,9 +84,11 @@ TcpServer::~TcpServer()
     SERVER_IS_RUNNING.store(false);
     shutdownActiveClients();
 
+    // Close epoll instance first (stops any further event delivery).
     if (epoll_fd != -1) {
         if (::close(epoll_fd) == 0) epoll_fd = -1;
     }
+    // Then close the listening socket itself.
     if (server_fd != -1) {
         if (::close(server_fd) == 0) server_fd = -1;
     }
@@ -88,6 +98,11 @@ TcpServer::~TcpServer()
 // ============================================================================
 // Cryptography (Argon2id via libsodium)
 // ============================================================================
+
+// Hashes a plaintext password using Argon2id with "interactive" cost params
+// (tuned for low-latency login flows, not for offline attacker resistance
+// maximization). The returned string is self-describing (contains salt +
+// algorithm + parameters), so no separate salt storage is needed.
 std::string TcpServer::hash_password(const std::string& password)
 {
     char hash[crypto_pwhash_STRBYTES]; // Output buffer for encoded hash
@@ -99,14 +114,16 @@ std::string TcpServer::hash_password(const std::string& password)
             password.size(),
             crypto_pwhash_OPSLIMIT_INTERACTIVE,   // CPU cost
             crypto_pwhash_MEMLIMIT_INTERACTIVE) != 0) { // RAM cost
+        // Typically fails only under extreme memory pressure.
         throw std::runtime_error("Password hashing failed (out of memory?)");
     }
     return std::string(hash);
 }
 
+// Verifies a plaintext password against a previously stored Argon2id hash.
+// Uses libsodium's built-in constant-time comparison to avoid timing attacks.
 bool TcpServer::verify_password(const std::string& password, const std::string& stored_hash)
 {
-    // Constant-time verification; reads params straight from the stored hash.
     return crypto_pwhash_str_verify(
         stored_hash.c_str(),
         password.c_str(),
@@ -116,6 +133,8 @@ bool TcpServer::verify_password(const std::string& password, const std::string& 
 // ============================================================================
 // I/O Socket Control Utilities
 // ============================================================================
+
+// Sets a file descriptor to non-blocking mode without clobbering other flags.
 void TcpServer::set_NonBlocking(int fd)
 {
     // Read current flags, then OR in O_NONBLOCK (preserves existing flags).
@@ -127,6 +146,9 @@ void TcpServer::set_NonBlocking(int fd)
     }
 }
 
+// Sends the full buffer, looping until all `length` bytes go out or an
+// unrecoverable error occurs. Handles partial writes and EINTR transparently.
+// Returns 0 on full success, -1 on failure (peer gone, buffer full, etc.).
 int TcpServer::sendAll(int fd, const char* buff, int length)
 {
     int total = 0;
@@ -147,15 +169,18 @@ int TcpServer::sendAll(int fd, const char* buff, int length)
     return 0;
 }
 
+// Convenience overload for std::string payloads — delegates to the raw-buffer version.
 int TcpServer::sendAll(int fd, const std::string& data)
 {
-    // Delegate to the raw-buffer overload.
     return sendAll(fd, data.c_str(), static_cast<int>(data.size()));
 }
 
 // ============================================================================
 // Epoll Subsystem Control
 // ============================================================================
+
+// Creates the epoll instance and registers the listening socket as the
+// first monitored fd. Must be called once before run()'s event loop starts.
 void TcpServer::initialize_epoll()
 {
     epoll_fd = epoll_create1(0);
@@ -175,10 +200,12 @@ void TcpServer::initialize_epoll()
     std::cout << "Epoll subsystem initialized cleanly\n";
 }
 
+// Registers a client fd with epoll under the given event mask
+// (caller decides level- vs edge-triggered and IN/OUT interest).
 void TcpServer::add_to_epoll(int fd, uint32_t events)
 {
     struct epoll_event ev{};
-    ev.events  = events; // Caller decides EPOLLIN / EPOLLOUT / ET, etc.
+    ev.events  = events;
     ev.data.fd = fd;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
@@ -186,6 +213,7 @@ void TcpServer::add_to_epoll(int fd, uint32_t events)
     }
 }
 
+// Unregisters an fd from epoll (e.g., right before closing it).
 void TcpServer::remove_from_epoll(int fd)
 {
     // nullptr event is valid for DEL on modern kernels.
@@ -197,12 +225,15 @@ void TcpServer::remove_from_epoll(int fd)
 // ============================================================================
 // Connection Demultiplexing & Identification
 // ============================================================================
+
+// O(1) check whether a username is currently online (in the active set).
 bool TcpServer::IsDuplicated_Username(const std::string& username)
 {
-    // O(1) lookup in the in-memory online-users set.
     return usernames.count(username) > 0;
 }
 
+// Fully tears down one client: stops epoll monitoring, closes the socket,
+// frees its username slot (if authenticated), and removes it from `clients`.
 void TcpServer::disconnect_client(int client_fd)
 {
     remove_from_epoll(client_fd); // Stop monitoring first
@@ -218,6 +249,8 @@ void TcpServer::disconnect_client(int client_fd)
     }
 }
 
+// Disconnects every currently active client. Used both during normal
+// shutdown and as a destructor safety net.
 void TcpServer::shutdownActiveClients()
 {
     // 1. Snapshot all active fds first — we can't erase while iterating the map.
@@ -237,22 +270,23 @@ void TcpServer::shutdownActiveClients()
     usernames.clear();
 }
 
-// ============================================================================
+
 // Shutdown — full teardown. Called by the destructor (normal context).
-// NEVER call this from a signal handler; use requestShutdown() there.
-// ============================================================================
+// NEVER call this from a signal handler; use requestShutdown() there
+// (which should only set SERVER_IS_RUNNING and let run() exit naturally).
 void TcpServer::Shutdown()
 {
     SERVER_IS_RUNNING.store(false); // Break the run() loop
     shutdownActiveClients();        // Drop every connection cleanly
 }
 
-// ============================================================================
+
 // handle_new_connection (ET-safe: drain the accept queue)
-// ============================================================================
+// Called whenever the listening socket reports EPOLLIN. Because the listener
+// is edge-triggered, we MUST accept() in a loop until EAGAIN, otherwise
+// pending connections could be silently missed.
 void TcpServer::handle_new_connection(Logger* logger)
 {
-    // Edge-triggered listener: must accept until EAGAIN or events get lost.
     while (true)
     {
         sockaddr_in client_addr{};
@@ -279,8 +313,9 @@ void TcpServer::handle_new_connection(Logger* logger)
         }
 
         if (ip_count >= MAX_CONNECTIONS_PER_IP) {
+            // Reject politely, then close without ever registering the client.
             sendAll(new_fd, "[ERROR]: Connection limit exceeded for this host IP\n");
-            close(new_fd); // Reject without registering
+            close(new_fd);
             continue;
         }
 
@@ -303,9 +338,11 @@ void TcpServer::handle_new_connection(Logger* logger)
     }
 }
 
-// ============================================================================
+
 // save_credentials (atomic write via temp file + rename)
-// ============================================================================
+// Reads the existing JSON DB (tolerating corruption), appends a new user
+// record with a hashed password + UTC timestamp, then writes atomically
+// so a crash mid-write never corrupts the live file.
 bool TcpServer::save_credentials(const std::string& username,
                                  const std::string& password,
                                  const std::string& ip_addr)
@@ -370,7 +407,8 @@ bool TcpServer::save_credentials(const std::string& username,
 }
 
 // ============================================================================
-// username_exists_in_db — on-disk uniqueness check.
+// username_exists_in_db — on-disk uniqueness check (covers users who
+// registered in a previous run and are not currently in the online set).
 // ============================================================================
 bool TcpServer::username_exists_in_db(const std::string& username)
 {
@@ -394,7 +432,8 @@ bool TcpServer::username_exists_in_db(const std::string& username)
 }
 
 // ============================================================================
-// verify_credentials (safe JSON access)
+// verify_credentials — loads the DB and checks the given plaintext password
+// against the stored Argon2id hash for a matching username.
 // ============================================================================
 bool TcpServer::verify_credentials(const std::string& username,
                                    const std::string& password)
@@ -428,10 +467,11 @@ bool TcpServer::verify_credentials(const std::string& username,
     return false;
 }
 
-// ============================================================================
-// process_message — handles exactly one complete (newline-terminated) record.
-// Returns false if the client got disconnected (caller must stop using fd).
-// ============================================================================
+// process_message — handles exactly one complete (newline-terminated) record
+// already extracted from a client's read buffer. Dispatches to login/register
+// handling or, if the client is authenticated, broadcasts it as a chat message.
+// Returns false if the client got disconnected (caller must stop using fd);
+// currently always returns true because disconnects here are deferred.
 bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
 {
     // Copy into the reusable C buffer for the legacy trim/parse utilities.
@@ -531,6 +571,8 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
 
 // ============================================================================
 // run (Main Event Loop)
+// Loads config, spins up epoll, and processes events until
+// SERVER_IS_RUNNING is flipped false (typically by a signal handler).
 // ============================================================================
 void TcpServer::run()
 {
@@ -561,19 +603,23 @@ void TcpServer::run()
             } else {
                 std::cerr << "Epoll wait error: " << strerror(errno) << std::endl;
             }
-            break;
+            break; // Unrecoverable epoll error — exit the loop
         }
-        if (nfds == 0) continue; // Timeout, no events
+        if (nfds == 0) continue; // Timeout, no events ready
 
         for (int i = 0; i < nfds; i++)
         {
             int fd = events[i].data.fd;
 
+            // New inbound connection ready on the listening socket.
             if (fd == server_fd) {
                 handle_new_connection(logger);
                 continue;
             }
 
+            // --- Drain all available data for this client fd ---
+            // Level-triggered socket, but we still loop to consume everything
+            // currently buffered by the kernel before moving to the next fd.
             bool disconnected = false;
             while (true)
             {
@@ -581,19 +627,23 @@ void TcpServer::run()
                 ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
 
                 if (n > 0) {
+                    // Append raw bytes to this client's private stream buffer;
+                    // framing (splitting on '\n') happens after the drain loop.
                     clients[fd].read_buffer.append(buffer, n);
                     continue;
                 }
 
                 if (n == 0) {
+                    // Peer performed an orderly shutdown (EOF).
                     log.Write_log("Client disconnected fd=" + std::to_string(fd), Logger::Info);
                     disconnect_client(fd);
                     disconnected = true;
                     break;
                 }
 
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                if (errno == EINTR) continue;
+                // n < 0: recv error.
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break; // No more data right now
+                if (errno == EINTR) continue;                        // Retry
                 perror("recv");
                 log.Write_log("Recv error on fd=" + std::to_string(fd) + ": " +
                               strerror(errno), Logger::Error);
@@ -602,11 +652,14 @@ void TcpServer::run()
                 break;
             }
 
+            // Client was closed/disconnected above — skip framing/processing.
             if (disconnected) continue;
 
             auto it = clients.find(fd);
-            if (it == clients.end()) continue;
+            if (it == clients.end()) continue; // Safety: fd vanished mid-loop
 
+            // --- Message framing: extract every complete '\n'-terminated
+            // record currently sitting in this client's buffer, one at a time.
             size_t newline_pos;
             while ((newline_pos = it->second.read_buffer.find('\n')) != std::string::npos)
             {
@@ -614,9 +667,11 @@ void TcpServer::run()
                 it->second.read_buffer.erase(0, newline_pos + 1);
 
                 if (!process_message(fd, complete, log)) {
-                    break;
+                    break; // Client got disconnected inside process_message
                 }
 
+                // Re-fetch iterator: process_message may have mutated `clients`
+                // (e.g., via disconnect_client on a broadcast failure).
                 it = clients.find(fd);
                 if (it == clients.end()) break;
             }

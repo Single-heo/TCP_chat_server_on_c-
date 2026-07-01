@@ -34,6 +34,7 @@
 #include <unordered_map>
 // Active username set for O(1) duplicate detection
 #include <unordered_set>
+// std::string — usernames, IPs, buffers, JSON fields
 #include <string>
 // nlohmann/json: header-only JSON library for credential persistence
 #include <nlohmann/json.hpp>
@@ -46,9 +47,14 @@
 #define DUPLICATED_USERNAME_ERROR "101" // Protocol error code: username already taken
 #define MAX_EVENTS 10                   // Max events returned per epoll_wait() call
 #define MAX_CONNECTIONS_PER_IP 5        // Anti connection-flood per host
-#define CREDENTIALS_PATH "/var/lib/tcpserver/credentials.json"
+#define CREDENTIALS_PATH "/var/lib/tcpserver/credentials.json" // On-disk JSON user DB
 
 
+// ============================================================================
+// TcpServer — epoll-driven, non-blocking, single-threaded TCP chat server.
+// Handles connection lifecycle, framing (newline-delimited protocol),
+// Argon2id-based credential auth, and JSON-backed persistence.
+// ============================================================================
 class TcpServer {
 public:
     // Creates the listening socket, sets SO_REUSEADDR, binds to
@@ -101,9 +107,11 @@ public:
     bool verify_credentials(const std::string& username,
                             const std::string& password);
 
-    // Main event loop.
+    // Main event loop: epoll_wait() dispatch → accept/recv/process per fd.
+    // Blocks until requestShutdown()/Shutdown() flips SERVER_IS_RUNNING.
     void run();
 
+    // Accessors — read-only introspection of server state.
     int getServerFd() const { return server_fd; }
     int getPort()     const { return port; }
 
@@ -117,6 +125,8 @@ public:
     };
 
     // All currently authenticated usernames (online session uniqueness).
+    // Separate from `clients` so lookup-by-username stays O(1) without
+    // scanning the fd map.
     std::unordered_set<std::string> usernames;
 
     // Returns true if `username` is currently online.
@@ -126,24 +136,35 @@ public:
     void disconnect_client(int client_fd);
 
     // Primary client registry: maps socket fd → Client struct.
+    // Public because process_message/run() and external callers may need
+    // direct fd-keyed access (e.g., broadcasting, admin commands).
     std::unordered_map<int, Client> clients;
 
+    // Disconnects every entry currently in `clients` (used on shutdown).
     void shutdownActiveClients();
 
+    // Normal-context full shutdown: stops the loop + drops all clients.
+    // Safe to call from destructor or explicit app-level teardown.
     void Shutdown();
 
+    // Signal-handler-safe shutdown request: only touches the atomic flag.
+    // Actual cleanup (fds, maps, logging) happens later in run(), never here.
     void requestShutdown() noexcept { SERVER_IS_RUNNING.store(false); }
 
 private:
-    Logger* logger{nullptr}; // Pointer to the logger instance
+    Logger* logger{nullptr}; // Non-owning pointer to the logger instance (may be null)
+
     // Processes one complete (newline-terminated) message for a given fd.
+    // Dispatches to login/register handling or chat broadcast.
     // Returns false if the client was disconnected during processing.
     bool process_message(int fd, const std::string& raw, Logger& log);
 
-    // Loop control. atomic<bool> so a signal handler can store(false) safely.
+    // Loop control. atomic<bool> so a signal handler can store(false) safely
+    // without touching non-signal-safe structures (maps, fds, streams).
     std::atomic<bool> SERVER_IS_RUNNING{true};
-    char buffer[BUFFER_SIZE]{};   // Reusable recv buffer
-    int server_fd{-1};            // The listening socket fd
-    int epoll_fd{-1};             // The epoll instance fd
+
+    char buffer[BUFFER_SIZE]{};   // Reusable recv() scratch buffer (reset each call)
+    int server_fd{-1};            // The listening socket fd (-1 = invalid/closed)
+    int epoll_fd{-1};             // The epoll instance fd (-1 = invalid/closed)
     int port{};                   // Port this server is bound to
 };

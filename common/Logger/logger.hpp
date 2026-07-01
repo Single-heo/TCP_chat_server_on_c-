@@ -4,8 +4,9 @@
 #include <string>
 #include "common/config/Configuration.hpp" // ServerConfig (LogPath, Run_without_logging)
 
-// Dual-sink logger: always writes to stdout (captured by journald/systemd),
-// and optionally mirrors to a log file. Degrades gracefully if the file fails.
+// Logger — dual-sink logger: always writes to stdout (captured by
+// journald/systemd via the "<priority>" prefix convention), and optionally
+// mirrors to a log file. Degrades gracefully if the file sink fails to open.
 class Logger {
 public:
     // Builds the logger from config; opens the log file unless logging is off.

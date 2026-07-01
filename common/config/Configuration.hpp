@@ -50,7 +50,7 @@ struct ServerConfig {
 
         // ---- [LOGS] toggle ----
         Run_without_logging =
-            (bool)ini.GetBoolValue("LOGS", "Run_Without_loggin", false);
+            (bool)ini.GetBoolValue("LOGS", "Run_Without_logging", false);
 
         return true;
     }
