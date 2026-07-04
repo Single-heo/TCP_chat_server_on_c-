@@ -57,12 +57,23 @@ A multi-client TCP chat server written in C++ using POSIX sockets, Linux `epoll`
 
 ### Dependencies
 
-```bash
-# Ubuntu / Debian
-sudo apt install libsodium-dev
+#### Debian/Ubuntu 
 
+<img width="20" height="22" alt="image" src="https://github.com/user-attachments/assets/0fa974f7-dcc4-4269-b083-3069af87e4c0"/>
+
+```bash
+
+sudo apt update
+sudo apt install argon2-dev -y
+sudo apt install libsodium-dev -y
+```
+
+#### Arch
+<img width="20" height="20" alt="image" src="https://github.com/user-attachments/assets/e994402a-a449-4141-b55f-75ed3b83c308" />
+
+```bash
 # Arch
-sudo pacman -S libsodium
+sudo pacman -S base-devel cmake pkgconf libsodium argon2
 ```
 
 ### CMake (recommended)
@@ -148,7 +159,6 @@ Unknown commands beginning with `/` print a local error and are not forwarded to
 
 - `epoll`-based single-threaded event loop monitors the server socket and all client fds
 - Server socket and all client sockets are set to `O_NONBLOCK` via `fcntl()`
-- New connections are accepted in `handle_new_connection()` and rejected with an error message if `MAX_CLIENTS` (7) is reached
 - Auth commands (`/register`, `/login`) are parsed and dispatched before any chat message is processed
 - Unauthenticated clients receive an error if they attempt to send chat messages
 - Partial messages are accumulated per client in `write_buffer` until a `\n` is received, then broadcast via `sendAll()`
@@ -190,7 +200,6 @@ Example entry in `DataBase/credentials.json`:
 - No TLS/SSL — credentials and messages travel in plain text over the wire
 - `recv()` does not loop on `EAGAIN` in edge-triggered mode (partial read possible under high load)
 - Write buffering on `EAGAIN` from `send()` is not yet implemented
-- Maximum 7 simultaneous clients (`MAX_CLIENTS`)
 - No message history or scrollback
 - Single-threaded — one slow client operation can delay others
 
