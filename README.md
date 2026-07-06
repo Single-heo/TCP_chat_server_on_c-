@@ -1,5 +1,7 @@
 # TCP Chat Application
 
+## Production-oriented TCP server framework written in modern C++ with TLS, Linux service integration, configurable architecture, and automated deployment.
+
 A multi-client TCP chat application written in **C++17** for Linux using POSIX sockets and the Linux `epoll` API.
 
 The project was developed as a learning exercise in systems programming and modern network programming. It implements secure user authentication using **Argon2id** (libsodium), an event-driven server architecture, and provides installation scripts that automatically configure the application as a native Linux service.
