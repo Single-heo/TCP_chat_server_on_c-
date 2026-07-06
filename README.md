@@ -298,13 +298,9 @@ To remove everything, including configuration, logs, database and the dedicated 
 # Current Limitations
 
 * No TLS/SSL encryption
-* Fixed maximum number of simultaneous clients
 * Single-threaded architecture
 * No message history
 * No offline messaging
-* No write buffering for `EAGAIN`
-* Receive path can be improved by reading until `EAGAIN` in edge-triggered mode
-
 ---
 
 # Planned Features
