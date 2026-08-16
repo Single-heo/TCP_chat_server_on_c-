@@ -169,6 +169,12 @@ or
 
 the server is installed as a native systemd service and starts automatically.
 
+#### Flow chart:
+
+<img width="1440" height="1332" alt="image" src="https://github.com/user-attachments/assets/76e5e5d6-c19b-40d2-bf88-5dab82bb03cc" />
+<img width="1440" height="1240" alt="image" src="https://github.com/user-attachments/assets/250e5de3-1053-46cb-a7ef-1c8bcce1f139" />
+
+
 Useful commands:
 
 ```bash
@@ -282,6 +288,9 @@ while preserving:
 * credential database
 * log files
 * `tcpserver` service user
+
+### FlowChart:
+<img width="1440" height="1120" alt="image" src="https://github.com/user-attachments/assets/841d0f45-fc0a-4c43-b678-fdb0257fb87c" />
 
 ---
 
