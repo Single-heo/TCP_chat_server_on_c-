@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <limits>        // std::numeric_limits (used in getInt and clearInput)
 #include <stdexcept>     // std::runtime_error
+#include <openssl/ssl.h> // SSL_CTX, SSL, SSL_connect, SSL_read, SSL_write
+#include <openssl/err.h> // ERR_print_errors_fp
 #include "../common/input.hpp"
 
 #define BUFFER_SIZE 1024
@@ -40,11 +42,20 @@ private:
     std::string server_ip{};     // Target server IP (stored for error messages)
     sockaddr_in address_of_server{}; // Resolved server address struct for connect()
 
+    // ── TLS state ──────────────────────────────────────────────────────────
+    SSL_CTX* ssl_ctx{nullptr};   // Client TLS context (created once per connection attempt)
+    SSL* ssl{nullptr};           // Active TLS session, once handshake succeeds
+
     // Flushes cin state after invalid input to avoid infinite error loops
     void clearInput() {
         std::cin.clear();
         std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     }
+
+    // Builds ssl_ctx with the right verification mode.
+    // ca_cert_path empty  -> SSL_VERIFY_NONE (dev/self-signed only, prints a warning)
+    // ca_cert_path set    -> loads it and requires SSL_VERIFY_PEER against it
+    bool init_ssl_ctx(const std::string& ca_cert_path);
 
 public:
     std::string username{};      // Authenticated username (set after successful auth)
@@ -91,16 +102,37 @@ public:
     // Translates errno codes from connect() into human-readable error messages
     int verify_error_connection(int error_code);
 
-    // Connects to the server and runs the full register/login handshake.
-    // Returns 0 on success, -1 on failure.
-    int connect_and_authenticate(const char* server_ipv4_address = "127.0.0.1");
+    // Performs the TLS client handshake over the already-connected client_fd.
+    // Must be called after connect() succeeds and before any application data
+    // is exchanged. Returns true on success.
+    bool tls_handshake(const std::string& ca_cert_path = "");
+
+    // Send/receive helpers that go through the active TLS session.
+    // Mirror send()/recv() semantics: return the number of bytes transferred,
+    // 0 on clean peer shutdown, -1 on error.
+    ssize_t tls_send(const void* buf, size_t len);
+    ssize_t tls_recv(void* buf, size_t len);
+
+    // Connects to the server, performs the TLS handshake, then runs the full
+    // register/login handshake over TLS. Returns 0 on success, -1 on failure.
+    // ca_cert_path: PEM file to verify the server's certificate against.
+    //               Leave empty only for local dev with a self-signed cert.
+    int connect_and_authenticate(const char* server_ipv4_address = "127.0.0.1",
+                                  const std::string& ca_cert_path = "");
 
     const char* getClientIp() const { return client_ip.c_str(); }
     int getClientFd()         const { return client_fd; }
     int getPort()             const { return port; }
 
-    // Closes the socket if still open
+    // Closes the TLS session/context and the socket if still open
     ~TcpClient() {
+        if (ssl) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+        }
+        if (ssl_ctx) {
+            SSL_CTX_free(ssl_ctx);
+        }
         if (client_fd >= 0)
             close(client_fd);
     }

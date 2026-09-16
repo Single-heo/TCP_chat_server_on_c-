@@ -66,6 +66,10 @@ SERVICE_FILE="/etc/systemd/system/tcpserver.service"
 DB_FILE="$DATA_DIR/credentials.json"
 LOG_FILE="$LOG_DIR/log.txt"
 
+TLS_DIR="$CONFIG_DIR/tls_files"
+TLS_CERT="$TLS_DIR/server.cert"
+TLS_KEY="$TLS_DIR/server.privkey"
+
 # ============================================================
 # Package manager detection
 # ============================================================
@@ -94,22 +98,29 @@ case "$PKG" in
         autoconf automake libtool \
         libsodium-dev \
         nlohmann-json3-dev \
+        libssl-dev \
+        openssl \
         acl
     ;;
+
   dnf|yum)
     "$PKG" groupinstall -y "Development Tools"
     "$PKG" install -y \
         cmake git pkgconf-pkg-config \
         autoconf automake libtool \
         libsodium-devel \
+        openssl-devel \
+        openssl \
         json-devel \
         acl
     ;;
+
   pacman)
     pacman -Sy --needed --noconfirm \
         base-devel cmake git pkgconf \
         autoconf automake libtool \
         libsodium \
+        openssl \
         nlohmann-json \
         acl
     ;;
@@ -142,6 +153,42 @@ chown tcpserver:tcpserver "$LOG_DIR"; chmod 750 "$LOG_DIR"
 [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
 chown tcpserver:tcpserver "$LOG_FILE"
 chmod 640 "$LOG_FILE"
+
+# ============================================================
+# TLS certificate (self-signed, issued by this machine)  [server only]
+# ============================================================
+if [ "$BUILD_SERVER" = "ON" ]; then
+    log_info "Setting up TLS material..."
+    mkdir -p "$TLS_DIR"
+    chown root:tcpserver "$TLS_DIR"
+    chmod 750 "$TLS_DIR"
+
+    if [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then
+        log_warn "TLS cert/key already exist, not overwritten."
+    else
+        if ! command -v openssl >/dev/null 2>&1; then
+            log_error "openssl not found, cannot generate TLS certificate."
+            exit 1
+        fi
+
+        CERT_CN="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"
+
+        log_info "Generating self-signed certificate (CN=$CERT_CN, 825 days)..."
+        openssl req -x509 -nodes \
+            -newkey rsa:4096 \
+            -keyout "$TLS_KEY" \
+            -out "$TLS_CERT" \
+            -days 825 \
+            -subj "/CN=$CERT_CN" \
+            -addext "subjectAltName=DNS:$CERT_CN,DNS:localhost,IP:127.0.0.1"
+
+        chown tcpserver:tcpserver "$TLS_KEY" "$TLS_CERT"
+        chmod 600 "$TLS_KEY"
+        chmod 640 "$TLS_CERT"
+    fi
+
+    setfacl -m u:tcpserver:rx "$TLS_DIR" 2>/dev/null || true
+fi
 
 # ============================================================
 # Build
@@ -230,3 +277,4 @@ log_info "Installation completed."
 printf "Artifacts:\n"
 [ "$BUILD_SERVER" = "ON" ] && printf "  %s/server\n" "$BIN_DIR"
 [ "$BUILD_CLIENT" = "ON" ] && printf "  %s/client\n" "$BIN_DIR"
+[ "$BUILD_SERVER" = "ON" ] && printf "  %s (cert)\n  %s (key)\n" "$TLS_CERT" "$TLS_KEY"

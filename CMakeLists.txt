@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(TCPChatApp VERSION 1.0 LANGUAGES CXX)
-
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_options(
--Wall
--Wextra
--Wpedantic
+    -Wall
+    -Wextra
+    -Wpedantic
 )
 
 option(BUILD_CLIENT "Build client" ON)
@@ -17,64 +17,67 @@ option(BUILD_SERVER "Build server" ON)
 
 find_package(PkgConfig REQUIRED)
 
-#
-
+# ============================================================
 # Common library
-
-#
-
+# ============================================================
 add_library(common STATIC
-common/Logger/logger.cpp
+    common/Logger/logger.cpp
 )
 
 target_include_directories(common
-PUBLIC
-${PROJECT_SOURCE_DIR}
-${PROJECT_SOURCE_DIR}/common
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/common
 )
 
-#
-
+# ============================================================
 # Client
-
-#
-
+# ============================================================
 if(BUILD_CLIENT)
 
+    # Client needs OpenSSL too, since it must speak TLS to the server
+    find_package(OpenSSL REQUIRED)
 
-add_executable(client
-    Client-side/Client-main.cpp
-)
+    add_executable(client
+        Client-side/Client-main.cpp
+    )
 
-target_link_libraries(client
-    PRIVATE
-        common
-)
-
+    target_link_libraries(client
+        PRIVATE
+            common
+            OpenSSL::SSL
+            OpenSSL::Crypto
+    )
 
 endif()
 
-#
-
+# ============================================================
 # Server
-
-#
-
+# ============================================================
 if(BUILD_SERVER)
 
+    pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    find_package(OpenSSL REQUIRED)
 
-pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    add_executable(server
+        Server-side/Server_main.cpp
+        Server-side/server_header_definition.cpp
+    )
 
-add_executable(server
-    Server-side/Server_main.cpp
-    Server-side/server_header_definition.cpp
-)
+    target_link_libraries(server
+        PRIVATE
+            common
+            PkgConfig::SODIUM
+            OpenSSL::SSL
+            OpenSSL::Crypto
+    )
 
-target_link_libraries(server
-    PRIVATE
-        common
-        PkgConfig::SODIUM
-)
-
+    # Paths written into install.sh — kept here as compile-time defaults so
+    # the server code can fall back to them if not overridden via config.
+    target_compile_definitions(server
+        PRIVATE
+            TLS_CERT_PATH="/etc/tcpserver/tls_files/server.cert"
+            TLS_KEY_PATH="/etc/tcpserver/tls_files/server.privkey"
+    )
 
 endif()

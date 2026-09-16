@@ -1,5 +1,15 @@
 #include "server-header.hpp"
+#include <cerrno>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <openssl/crypto.h>
+#include <openssl/prov_ssl.h>
+#include <openssl/ssl.h>
+#include <string>
+#include <sys/epoll.h>
+#include <unistd.h>
 #include <vector>
 #include <cstring>
 #include <iostream>
@@ -92,6 +102,7 @@ TcpServer::~TcpServer()
     if (server_fd != -1) {
         if (::close(server_fd) == 0) server_fd = -1;
     }
+    SSL_CTX_free(ServerCtx);
 }
 
 
@@ -149,28 +160,43 @@ void TcpServer::set_NonBlocking(int fd)
 // Sends the full buffer, looping until all `length` bytes go out or an
 // unrecoverable error occurs. Handles partial writes and EINTR transparently.
 // Returns 0 on full success, -1 on failure (peer gone, buffer full, etc.).
-int TcpServer::sendAll(int fd, const char* buff, int length)
+TcpServer::SendResult TcpServer::sendAll(int fd, const char* buff, int length)
 {
     int total = 0;
-    // Loop until every byte is written (send may return fewer bytes than asked).
-    while (total < length) {
-        ssize_t n = send(fd, buff + total, length - total, 0);
-        if (n == -1) {
-            if (errno == EINTR) continue;             // Interrupted, retry
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Socket buffer full. For a robust server this should queue the
-                // remainder and watch EPOLLOUT. Here we signal failure to caller.
-                return -1;
-            }
-            return -1; // Hard error
-        }
-        total += static_cast<int>(n);
-    }
-    return 0;
-}
 
+    while (total < length)
+    {
+        int n = SSL_write(clients[fd].ssl,buff + total,length - total);
+
+        if (n > 0)
+        {
+            total += n;
+            continue;
+        }
+
+        int err = SSL_get_error(clients[fd].ssl, n);
+
+        if (err == SSL_ERROR_WANT_READ)
+        {
+            // SSL_write() needs the socket readable before continuing.
+            ModifyEpoll(epoll_fd, fd, EPOLLIN);
+            return SendResult::WANT_READ;
+        }
+
+        if (err == SSL_ERROR_WANT_WRITE)
+        {
+            // SSL_write() needs the socket writable before continuing.
+            ModifyEpoll(epoll_fd, fd, EPOLLOUT);
+            return SendResult::WANT_WRITE;
+        }
+
+        // Real TLS/socket error.
+        return SendResult::FATAL_ERROR;
+    }
+    return SendResult::SUCCESS;
+}
 // Convenience overload for std::string payloads — delegates to the raw-buffer version.
-int TcpServer::sendAll(int fd, const std::string& data)
+TcpServer::SendResult TcpServer::sendAll(int fd, const std::string& data)
 {
     return sendAll(fd, data.c_str(), static_cast<int>(data.size()));
 }
@@ -242,6 +268,7 @@ void TcpServer::disconnect_client(int client_fd)
     // Erase from registry and free the username slot if it was authenticated.
     auto it = clients.find(client_fd);
     if (it != clients.end()) {
+        SSL_free(it->second.ssl);
         if (!it->second.username.empty()) {
             usernames.erase(it->second.username);
         }
@@ -279,13 +306,48 @@ void TcpServer::Shutdown()
     SERVER_IS_RUNNING.store(false); // Break the run() loop
     shutdownActiveClients();        // Drop every connection cleanly
 }
+// Make the tls handshake until it done brooooo
+TcpServer::SendResult TcpServer::doHandshake(Client *client, Logger* logger)
+    {
+        int ret = SSL_accept(client->ssl);
+        
+        if (ret == 1 ) 
+        {
+            client->handshake_complete = true;
+        }
 
+        int handshake_error = SSL_get_error(client->ssl, ret);
+        
+        if (handshake_error == SSL_ERROR_WANT_WRITE) 
+        {
+            client->ssl_want_write = true;
+            ModifyEpoll(epoll_fd, client->fd, EPOLLOUT);
+            return TcpServer::SendResult::WANT_WRITE;
+        }
+        if (handshake_error == SSL_ERROR_NONE) 
+        {   
+            return TcpServer::SendResult::SUCCESS;
+        }
+        if (handshake_error == SSL_ERROR_WANT_READ) 
+        {
+            client->ssl_want_read = true;
+            ModifyEpoll(epoll_fd, client->fd, EPOLLIN);
+            return TcpServer::SendResult::WANT_READ;
+        }
+        else 
+        {
+            logger->Write_log("Fatal tls handshake_error!, closing client!", Logger::Error);
+            disconnect_client(client->fd);
+            return TcpServer::SendResult::FATAL_ERROR;
+        }
+
+    }
 
 // handle_new_connection (ET-safe: drain the accept queue)
 // Called whenever the listening socket reports EPOLLIN. Because the listener
 // is edge-triggered, we MUST accept() in a loop until EAGAIN, otherwise
 // pending connections could be silently missed.
-void TcpServer::handle_new_connection(Logger* logger)
+int TcpServer::handle_new_connection(Logger* logger)
 {
     while (true)
     {
@@ -314,28 +376,59 @@ void TcpServer::handle_new_connection(Logger* logger)
 
         if (ip_count >= MAX_CONNECTIONS_PER_IP) {
             // Reject politely, then close without ever registering the client.
-            sendAll(new_fd, "[ERROR]: Connection limit exceeded for this host IP\n");
+            rawSendAll(new_fd, "[ERROR]: Connection limit exceeded for this host IP\n",52);
             close(new_fd);
             continue;
         }
 
         set_NonBlocking(new_fd);
         add_to_epoll(new_fd, EPOLLIN); // Level-triggered for clients (simpler framing)
+        SSL* ClientSSl = SSL_new(ServerCtx);
+        if (!ClientSSl) 
+        {
+            logger->Write_log("Error on creating ssl object for the client!", Logger::Error);
+            close(new_fd);
+            return 1;
+        } 
+        SSL_set_fd(ClientSSl, new_fd); // Initialize Handshake state
+        int result = SSL_accept(ClientSSl);
+        if (result == 1) 
+        {
+            logger->Write_log("TLS Handshake done!", Logger::Info);
+        }
+        int handshake_error = SSL_get_error(ClientSSl, result);
 
         // Build and store the per-client state.
         Client c;
         c.fd         = new_fd;
         c.ip_address = new_ip;
+        c.ssl = ClientSSl;
         c.port       = ntohs(client_addr.sin_port); // Network → host byte order
         clients[new_fd] = std::move(c);
+        
+        if (handshake_error == SSL_ERROR_WANT_WRITE) 
+        {
+            clients[new_fd].ssl_want_write = true;
+            ModifyEpoll(epoll_fd, new_fd, EPOLLOUT);
+            logger->Write_log("Error on tls handshake, new client want to WRITE on IP: " + new_ip + ":" + std::to_string(clients[new_fd].port), Logger::Warn);
+        }
 
-        if (logger) {
+        if (handshake_error == SSL_ERROR_WANT_READ) 
+        {
+            clients[new_fd].ssl_want_read = true;
+            ModifyEpoll(epoll_fd, new_fd, EPOLLIN);
+            logger->Write_log("Error on tls handshake, new client want to READ on IP: " + new_ip + ":" + std::to_string(clients[new_fd].port), Logger::Warn); 
+        }
+
+        if (logger) 
+        {
             logger->Write_log(
                 "Fd: " + std::to_string(new_fd) + " New connection from " + new_ip + ":" + std::to_string(clients[new_fd].port),
                 Logger::Info);
         }
         std::cout << "New connection from " << new_ip << ":" << std::to_string(clients[new_fd].port) << " (fd: " << new_fd << ")\n";
     }
+    return 0;
 }
 
 
@@ -431,6 +524,27 @@ bool TcpServer::username_exists_in_db(const std::string& username)
     return false;
 }
 
+int TcpServer::rawSendAll(int fd, const char* buff, int length)
+{
+    int total = 0;
+    // Loop until every byte is written (send may return fewer bytes than asked).
+    while (total < length) {
+        ssize_t n = send(fd, buff + total, length - total, 0);
+        if (n == -1) {
+            if (errno == EINTR) continue;             // Interrupted, retry
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket buffer full. For a robust server this should queue the
+                // remainder and watch EPOLLOUT. Here we signal failure to caller.
+                return -1;
+            }
+            return -1; // Hard error
+        }
+        total += static_cast<int>(n);
+    }
+    return 0;
+}
+
+
 // ============================================================================
 // verify_credentials — loads the DB and checks the given plaintext password
 // against the stored Argon2id hash for a matching username.
@@ -467,12 +581,64 @@ bool TcpServer::verify_credentials(const std::string& username,
     return false;
 }
 
+int TcpServer::initialize_tls(ServerConfig* Config, Logger* Log){
+   //----------
+   // OPENSSL 
+   //----------
+   ServerCtx = SSL_CTX_new(TLS_server_method());
+   if (!ServerCtx) 
+   {
+      SSL_CTX_free(ServerCtx);
+      fprintf(stderr,"Error on creating ctx object to the Server! Code:%d \n System Message: %s",errno,strerror(errno));
+      return -1;
+   } 
+   SSL_CTX_set_min_proto_version(ServerCtx,TLS1_2_VERSION);
+  
+   // Certificate
+   if (Config->CertificateFile.empty()) 
+   {
+      Log->Write_log("Error During loading TLS Certificate. Please verify if you put the path to the CertificateFile", Logger::Error);
+      SSL_CTX_free(ServerCtx);
+      return -2;
+   }
+
+   if (SSL_CTX_use_certificate_file(ServerCtx,Config->CertificateFile.c_str(),SSL_FILETYPE_PEM) <= 0) 
+   {
+      Log->Write_log("Error on loading the CertificateFile", Logger::Error);
+      SSL_CTX_free(ServerCtx);
+      ServerCtx = nullptr;
+      return -3;
+   }
+   
+   if (Config->PrivateKeyFile.empty()) {
+      Log->Write_log("Error During load TLS Server Private Key. Please verify if you put the path to the PrivateKeyFile", Logger::Error);
+      SSL_CTX_free(ServerCtx);
+      return -2;
+   }
+
+   if (SSL_CTX_use_PrivateKey_file(ServerCtx,Config->PrivateKeyFile.c_str(),SSL_FILETYPE_PEM) <= 0)
+   {   
+      Log->Write_log("Errir on loading the PrivateKeyFile", Logger::Error);
+      SSL_CTX_free(ServerCtx);
+      return -3;
+   }
+
+   if (!SSL_CTX_check_private_key(ServerCtx)) 
+   {
+      Log->Write_log("Error on loading CertificateFile and PrivateKeyFile. They don't Match", Logger::Error);
+      SSL_CTX_free(ServerCtx);
+      return -4;
+   }
+
+  return 0; 
+}
+
 // process_message — handles exactly one complete (newline-terminated) record
 // already extracted from a client's read buffer. Dispatches to login/register
 // handling or, if the client is authenticated, broadcasts it as a chat message.
 // Returns false if the client got disconnected (caller must stop using fd);
 // currently always returns true because disconnects here are deferred.
-bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
+bool TcpServer::process_message(int fd, const std::string& raw, Logger* log)
 {
     // Copy into the reusable C buffer for the legacy trim/parse utilities.
     memset(buffer, 0, BUFFER_SIZE);
@@ -495,7 +661,7 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
                 username_exists_in_db(temp.username))
             {
                 sendAll(fd, "Error: username already taken\n");
-                log.Write_log("Registration failed for " + temp.username +
+                log->Write_log("Registration failed for " + temp.username +
                               ": username already taken", Logger::Warn);
                 return true;
             }
@@ -503,7 +669,7 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
             // Persist before marking online (fail closed if write fails).
             if (!save_credentials(temp.username, temp.password, clients[fd].ip_address)) {
                 sendAll(fd, "Error: could not save credentials\n");
-                log.Write_log("Persistence failure registering " + temp.username, Logger::Error);
+                log->Write_log("Persistence failure registering " + temp.username, Logger::Error);
                 return true;
             }
 
@@ -511,7 +677,8 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
             usernames.insert(temp.username);      // Mark online
 
             sendAll(fd, "Registered " + temp.username + "\n");
-            log.Write_log("New user registered: " + temp.username, Logger::Info);
+            log->Write_log("New user registered: " + temp.username, Logger::Info);
+
             return true;
         }
 
@@ -521,7 +688,7 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
             // Prevent the same account being online twice.
             if (IsDuplicated_Username(temp.username)) {
                 sendAll(fd, "Error: user already logged in\n");
-                log.Write_log("Duplicate login blocked for " + temp.username, Logger::Warn);
+                log->Write_log("Duplicate login blocked for " + temp.username, Logger::Warn);
                 return true;
             }
 
@@ -529,7 +696,7 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
                 clients[fd].username = temp.username;
                 usernames.insert(temp.username);
                 sendAll(fd, "Login successful for " + temp.username + "\n");
-                log.Write_log("User logged in: " + temp.username, Logger::Info);
+                log->Write_log("User logged in: " + temp.username, Logger::Info);
             } else {
                 sendAll(fd, "Error: invalid username or password\n");
             }
@@ -543,7 +710,7 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
     // Require authentication before relaying anything.
     if (clients[fd].username.empty())
     {
-        sendAll(fd, "Error: please register or login first\n");
+        sendAll(fd, "Error: please register or login first\n"); 
         return true;
     }
 
@@ -554,20 +721,35 @@ bool TcpServer::process_message(int fd, const std::string& raw, Logger& log)
     for (auto& [client_fd, client_data] : clients)
     {
         if (client_fd == fd) continue; // Don't echo back to sender
-        if (sendAll(client_fd, msg) == -1) {
+        if (sendAll(client_fd, msg) == TcpServer::SendResult::FATAL_ERROR) {
             to_disconnect.push_back(client_fd); // Dead peer — clean up after loop
         }
     }
 
     // Deferred teardown: avoids mutating the map mid-iteration.
     for (int disc_fd : to_disconnect) {
-        log.Write_log("Disconnected client fd=" + std::to_string(disc_fd) +
+        log->Write_log("Disconnected client fd=" + std::to_string(disc_fd) +
                       " due to send error", Logger::Warn);
         disconnect_client(disc_fd);
     }
 
     return true;
 }
+
+// Modify which events epoll monitors for a file descriptor.
+void TcpServer::ModifyEpoll(int epoll_fd, int fd, uint32_t events)
+{
+    struct epoll_event event = {0};
+
+    event.events = events;
+    event.data.fd = fd;
+
+    if (epoll_ctl(epoll_fd,EPOLL_CTL_MOD,fd,&event) == -1)
+    {
+        fprintf(stderr, "Error on moodification of this FD! code: %d",errno);
+        exit(EXIT_FAILURE);
+    }
+}                                                                                                                                                                                          
 
 // ============================================================================
 // run (Main Event Loop)
@@ -583,8 +765,8 @@ void TcpServer::run()
         exit(EXIT_FAILURE);
     }
 
-    Logger log(config);   // Local logger bound to loaded config
     initialize_epoll();   // Arm the epoll instance
+    initialize_tls(&config, logger);
 
     struct epoll_event events[MAX_EVENTS]; // Ready-events output array
 
@@ -617,39 +799,49 @@ void TcpServer::run()
                 continue;
             }
 
-            // --- Drain all available data for this client fd ---
+            if ((clients[fd].ssl_want_write == true || clients[fd].ssl_want_read == true) && clients[fd].handshake_complete == false) 
+            {
+                TcpServer::SendResult handshake_result = doHandshake(&clients[fd],logger);
+                if (handshake_result == TcpServer::SendResult::SUCCESS) 
+                {
+                    clients[fd].handshake_complete = true;
+                    clients[fd].ssl_want_read = false;
+                    clients[fd].ssl_want_write = false;
+                }
+                continue;
+            }
+
+              // --- Drain all available data for this client fd ---
             // Level-triggered socket, but we still loop to consume everything
             // currently buffered by the kernel before moving to the next fd.
             bool disconnected = false;
             while (true)
             {
                 memset(buffer, 0, BUFFER_SIZE);
-                ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
+                ssize_t BytesReaded = SSL_read(clients[fd].ssl, buffer, BUFFER_SIZE - 1);
 
-                if (n > 0) {
+                if (BytesReaded > 0 && events[i].events == EPOLLIN) {
                     // Append raw bytes to this client's private stream buffer;
                     // framing (splitting on '\n') happens after the drain loop.
-                    clients[fd].read_buffer.append(buffer, n);
-                    continue;
-                }
-
-                if (n == 0) {
-                    // Peer performed an orderly shutdown (EOF).
-                    log.Write_log("Client disconnected fd=" + std::to_string(fd), Logger::Info);
-                    disconnect_client(fd);
-                    disconnected = true;
+                    clients[fd].read_buffer.append(buffer, BytesReaded);
                     break;
                 }
 
-                // n < 0: recv error.
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break; // No more data right now
-                if (errno == EINTR) continue;                        // Retry
-                perror("recv");
-                log.Write_log("Recv error on fd=" + std::to_string(fd) + ": " +
-                              strerror(errno), Logger::Error);
-                disconnect_client(fd);
-                disconnected = true;
-                break;
+                int TLS_read_error = SSL_get_error(clients[fd].ssl, BytesReaded);
+
+                if (TLS_read_error == SSL_ERROR_WANT_READ) 
+                {
+                    ModifyEpoll(epoll_fd, clients[fd].fd, EPOLLIN);
+                    break;
+                }
+                if (TLS_read_error == SSL_ERROR_WANT_WRITE) 
+                {
+                    ModifyEpoll(epoll_fd, clients[fd].fd, EPOLLOUT);
+                    break;
+                }
+
+              disconnect_client(fd);
+              break;
             }
 
             // Client was closed/disconnected above — skip framing/processing.
@@ -666,7 +858,7 @@ void TcpServer::run()
                 std::string complete = it->second.read_buffer.substr(0, newline_pos + 1);
                 it->second.read_buffer.erase(0, newline_pos + 1);
 
-                if (!process_message(fd, complete, log)) {
+                if (!process_message(fd, complete, logger)) {
                     break; // Client got disconnected inside process_message
                 }
 

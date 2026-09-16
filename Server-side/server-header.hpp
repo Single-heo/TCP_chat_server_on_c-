@@ -1,5 +1,8 @@
 #pragma once
 
+// Openssl - Make the messages secrets
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 // std::atomic<bool> — async-signal-safe flag
 #include <atomic>   
 // libsodium: crypto primitives (Argon2id hashing + future encryption)
@@ -8,6 +11,7 @@
 #include "common/Logger/logger.hpp"
 // The configuration header that loads the config_file.ini
 #include "common/config/Configuration.hpp"
+#include "nlohmann/detail/value_t.hpp"
 // fcntl: F_GETFL, F_SETFL for setting O_NONBLOCK on sockets
 #include <fcntl.h>
 // epoll_create1, epoll_ctl, epoll_wait — Linux I/O event notification
@@ -63,6 +67,9 @@ public:
 
     // Closes all client fds, the epoll fd, and the server fd
     ~TcpServer();
+    
+    // Set up the basic objects for tls work properly
+    int initialize_tls(ServerConfig *Config, Logger* Log); 
 
     // Verifies a plaintext password against an Argon2id hash from the DB.
     // Uses crypto_pwhash_str_verify — never compares plaintext directly.
@@ -72,15 +79,30 @@ public:
     // Returns the encoded hash string (includes salt, algorithm, params).
     std::string hash_password(const std::string& password);
 
+    // What sendAll have returned ??
+    enum class SendResult
+    {
+        SUCCESS,
+        WANT_READ,
+        WANT_WRITE,
+        FATAL_ERROR,
+    };
+
+    // Tcp sendAll
+    int rawSendAll(int fd, const char* buff, int length);
+
     // Guarantees all `length` bytes of `buff` are sent to `fd`.
     // Loops on send() to handle partial writes. Returns 0 on success, -1 on error.
-    int sendAll(int fd, const char* buff, int length);
+    SendResult sendAll(int fd, const char* buff, int length);
 
     // Convenience wrapper to send a std::string fully.
-    int sendAll(int fd, const std::string& data);
+    SendResult sendAll(int fd, const std::string& data);
 
     // Sets O_NONBLOCK on `fd` via fcntl.
     void set_NonBlocking(int fd);
+
+    // Modify which events epoll monitors for a file descriptor.
+    void ModifyEpoll(int epoll_fd, int fd, uint32_t events);
 
     // Creates the epoll instance and registers server_fd (EPOLLIN|EPOLLET).
     void initialize_epoll();
@@ -92,7 +114,7 @@ public:
     void remove_from_epoll(int fd);
 
     // Accepts pending connections on server_fd (ET-safe loop).
-    void handle_new_connection(Logger* logger);
+    int handle_new_connection(Logger* logger);
 
     // Appends a new user with hashed password + timestamp. Atomic write.
     // Returns true on success.
@@ -114,15 +136,22 @@ public:
     // Accessors — read-only introspection of server state.
     int getServerFd() const { return server_fd; }
     int getPort()     const { return port; }
-
+    
     // Per-client state stored in the clients map
     struct Client {
-        int fd{};                  // Socket file descriptor
-        std::string ip_address{};  // Client's dotted-decimal IPv4 address
-        int port{};                // Client's ephemeral source port
-        std::string username{};    // Set after /register or /login; empty until then
-        std::string read_buffer{}; // Accumulates recv() chunks until '\n' is seen
-    };
+        int fd{};                       // Socket file descriptor
+        SSL* ssl{nullptr};              // SSL object to put ssl in tcp raw sockets
+        bool handshake_complete{false}; // Handshake State
+        bool ssl_want_read{false};      // Monitor if ssl want read
+        bool ssl_want_write{false};     // Monitor if ssl want write
+        std::string ip_address{};       // Client's dotted-decimal IPv4 address
+        int port{};                     // Client's ephemeral source port
+        std::string username{};         // Set after /register or /login; empty until then
+        std::string read_buffer{};      // Accumulates recv() chunks until '\n' is seen
+    }typedef Client;
+
+    // Do Tls handshake_complete!
+    SendResult doHandshake(Client* client, Logger* logger); 
 
     // All currently authenticated usernames (online session uniqueness).
     // Separate from `clients` so lookup-by-username stays O(1) without
@@ -157,8 +186,8 @@ private:
     // Processes one complete (newline-terminated) message for a given fd.
     // Dispatches to login/register handling or chat broadcast.
     // Returns false if the client was disconnected during processing.
-    bool process_message(int fd, const std::string& raw, Logger& log);
-
+    bool process_message(int fd, const std::string& raw, Logger* log);
+    
     // Loop control. atomic<bool> so a signal handler can store(false) safely
     // without touching non-signal-safe structures (maps, fds, streams).
     std::atomic<bool> SERVER_IS_RUNNING{true};
@@ -167,4 +196,5 @@ private:
     int server_fd{-1};            // The listening socket fd (-1 = invalid/closed)
     int epoll_fd{-1};             // The epoll instance fd (-1 = invalid/closed)
     int port{};                   // Port this server is bound to
+    SSL_CTX* ServerCtx{nullptr};
 };

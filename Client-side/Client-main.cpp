@@ -6,6 +6,7 @@
 #include <cerrno>        // errno, EINTR
 #include <fcntl.h>       // fcntl, F_GETFL, F_SETFL, O_NONBLOCK
 #include <termios.h>     // tcgetattr, tcsetattr, termios — raw terminal control
+#include <cstdlib>       // getenv
 
 #define DUPLICATED_USERNAME_ERROR "101"
 
@@ -60,11 +61,117 @@ int TcpClient::getInt(const std::string& prompt, int min, int max)
 }
 
 // ---------------------------------------------------------------------------
+// init_ssl_ctx — builds the client's SSL_CTX with the right verification mode
+// ---------------------------------------------------------------------------
+bool TcpClient::init_ssl_ctx(const std::string& ca_cert_path)
+{
+    const SSL_METHOD* method = TLS_client_method();
+    ssl_ctx = SSL_CTX_new(method);
+    if (!ssl_ctx) {
+        std::cerr << "Failed to create SSL context\n";
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    // Refuse to negotiate anything below TLS 1.2
+    SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
+
+    if (!ca_cert_path.empty()) {
+        if (SSL_CTX_load_verify_locations(ssl_ctx, ca_cert_path.c_str(), nullptr) != 1) {
+            std::cerr << "Failed to load CA certificate: " << ca_cert_path << "\n";
+            ERR_print_errors_fp(stderr);
+            return false;
+        }
+        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+    } else {
+        std::cerr << "[WARNING] TLS certificate verification is DISABLED "
+                     "(no CA cert provided). Anyone able to intercept the "
+                     "connection could impersonate the server. Set the "
+                     "CHAT_CA_CERT environment variable to your server's "
+                     "CA/cert PEM file to enable verification.\n";
+        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, nullptr);
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// tls_handshake — performs the TLS client handshake over client_fd
+// ---------------------------------------------------------------------------
+bool TcpClient::tls_handshake(const std::string& ca_cert_path)
+{
+    if (!init_ssl_ctx(ca_cert_path))
+        return false;
+
+    ssl = SSL_new(ssl_ctx);
+    if (!ssl) {
+        std::cerr << "Failed to create SSL object\n";
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    if (SSL_set_fd(ssl, client_fd) != 1) {
+        std::cerr << "Failed to bind SSL object to socket\n";
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    // SNI — harmless for an IP-addressed dev server, useful once you put
+    // this behind a real hostname
+    SSL_set_tlsext_host_name(ssl, server_ip.c_str());
+
+    int ret = SSL_connect(ssl);
+    if (ret != 1) {
+        int err = SSL_get_error(ssl, ret);
+        std::cerr << "TLS handshake failed (SSL error code " << err << ")\n";
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    std::cout << "✓ TLS handshake complete — " << SSL_get_version(ssl)
+              << ", cipher " << SSL_get_cipher(ssl) << "\n";
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// tls_send / tls_recv — thin wrappers around SSL_write / SSL_read
+// ---------------------------------------------------------------------------
+ssize_t TcpClient::tls_send(const void* buf, size_t len)
+{
+    if (!ssl) return -1;
+
+    int ret = SSL_write(ssl, buf, static_cast<int>(len));
+    if (ret <= 0) {
+        int err = SSL_get_error(ssl, ret);
+        std::cerr << "TLS write error (code " << err << ")\n";
+        return -1;
+    }
+    return ret;
+}
+
+ssize_t TcpClient::tls_recv(void* buf, size_t len)
+{
+    if (!ssl) return -1;
+
+    int ret = SSL_read(ssl, buf, static_cast<int>(len));
+    if (ret <= 0) {
+        int err = SSL_get_error(ssl, ret);
+        if (err == SSL_ERROR_ZERO_RETURN)
+            return 0; // peer sent close_notify — treat like recv() returning 0
+        return -1;
+    }
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
 // connect_and_authenticate
-// Establishes the TCP connection and performs the register/login handshake.
+// Establishes the TCP connection, performs the TLS handshake, then runs the
+// register/login handshake over the encrypted channel.
 // Returns 0 on success, -1 on failure.
 // ---------------------------------------------------------------------------
-int TcpClient::connect_and_authenticate(const char* server_ipv4_address)
+int TcpClient::connect_and_authenticate(const char* server_ipv4_address,
+                                         const std::string& ca_cert_path)
 {
     server_ip = server_ipv4_address;
 
@@ -91,6 +198,17 @@ int TcpClient::connect_and_authenticate(const char* server_ipv4_address)
         close(client_fd);
         client_fd = socket(AF_INET, SOCK_STREAM, 0); // fresh socket for retry
         return verify_error_connection(err);
+    }
+
+    // ── TLS handshake ─────────────────────────────────────────────────────
+    // Everything below this point (auth + chat) rides on the encrypted
+    // channel instead of the raw socket.
+    if (!tls_handshake(ca_cert_path)) {
+        std::cerr << "Could not establish a secure connection to "
+                  << server_ip << ":" << port << std::endl;
+        close(client_fd);
+        client_fd = -1;
+        return -1;
     }
 
     // ── Auth mode selection ──────────────────────────────────────────────────
@@ -123,13 +241,16 @@ int TcpClient::connect_and_authenticate(const char* server_ipv4_address)
         exit(1);
     }
 
-    // ── Send credentials to server ───────────────────────────────────────────
+    // ── Send credentials to server (over TLS) ────────────────────────────────
     std::string auth_msg = format_auth_message(creds, mode);
-    send(client_fd, auth_msg.c_str(), auth_msg.length(), 0);
+    if (tls_send(auth_msg.c_str(), auth_msg.length()) <= 0) {
+        std::cerr << "Failed to send credentials over TLS\n";
+        return -1;
+    }
 
-    // ── Read server response ─────────────────────────────────────────────────
+    // ── Read server response (over TLS) ──────────────────────────────────────
     char response[256]{};
-    ssize_t n = recv(client_fd, response, sizeof(response) - 1, 0);
+    ssize_t n = tls_recv(response, sizeof(response) - 1);
 
     if (n > 0) {
         response[n] = '\0';
@@ -188,6 +309,7 @@ int TcpClient::verify_error_connection(int error_code)
 
 // ---------------------------------------------------------------------------
 // verify_command — handles slash-commands or sends regular chat messages
+// (chat messages now go out over the TLS session via tls_send)
 // ---------------------------------------------------------------------------
 void TcpClient::verify_command(std::string *input_buffer, int sockfd)
 {
@@ -213,9 +335,9 @@ void TcpClient::verify_command(std::string *input_buffer, int sockfd)
         input_buffer->clear();
     }
     else {
-        // Regular chat message — send to server
+        // Regular chat message — send to server over TLS
         input_buffer->append("\n");
-        send(sockfd, input_buffer->c_str(), input_buffer->size(), 0);
+        tls_send(input_buffer->c_str(), input_buffer->size());
         input_buffer->clear();
     }
 }
@@ -328,7 +450,7 @@ void TcpClient::register_user(int server_socket, Errortype type)
     // register_username() returns "username|password" string
     username = register_username();
     std::string greeting = "/username " + username + "\n";
-    send(server_socket, greeting.c_str(), greeting.size(), 0);
+    tls_send(greeting.c_str(), greeting.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -388,18 +510,28 @@ std::string TcpClient::register_username()
 // ===========================================================================
 int main()
 {
+    // Initialize OpenSSL (safe/no-op to call more than once on 1.1+/3.x)
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+
     int port = 25565;
 
     // Prompt for the server IP, validated as an IPv4 address
     std::string server_ip = getString("Enter server ip address: ",
                                       false, true, StringType::IPV4);
 
+    // Optional: path to the server's CA/cert PEM file for verification.
+    // Leave CHAT_CA_CERT unset only for local dev against a self-signed cert.
+    std::string ca_cert_path;
+    if (const char* env_ca = std::getenv("CHAT_CA_CERT")) {
+        ca_cert_path = env_ca;
+    }
+
     // Construct client (creates socket); local IP is informational only
     TcpClient client(port, server_ip.c_str());
 
     // Retry connection until success (network may be temporarily unavailable)
     while (true) {
-        int conn_result = client.connect_and_authenticate(server_ip.c_str());
+        int conn_result = client.connect_and_authenticate(server_ip.c_str(), ca_cert_path);
         if (conn_result == 0) break;
         std::cout << "Retrying connection in 5 seconds...\n";
         sleep(5);
@@ -443,14 +575,15 @@ int main()
         if (registered && FD_ISSET(STDIN_FILENO, &read_fds))
             handle_stdin(sockfd, &client);
 
-        // ── Handle incoming server data ──────────────────────────────────────
+        // ── Handle incoming server data (over TLS) ───────────────────────────
         if (FD_ISSET(sockfd, &read_fds))
         {
             char buf[1024]{};
-            ssize_t n = recv(sockfd, buf, sizeof(buf) - 1, 0);
+            ssize_t n = client.tls_recv(buf, sizeof(buf) - 1);
 
             if (n <= 0) {
-                // n == 0: server closed connection; n < 0: socket error
+                // n == 0: server closed connection (or sent close_notify);
+                // n < 0: TLS/socket error
                 std::cout << "\nServer disconnected.\n";
                 restore_stdin();
                 close(sockfd);
@@ -536,7 +669,7 @@ void handle_stdin(int sockfd, TcpClient* client)
                 // Route the buffer through verify_command:
                 //   • slash-commands (/clear, /exit, /help) are handled locally
                 //   • unknown slash-commands print an error
-                //   • plain text is sent to the server as a chat message
+                //   • plain text is sent to the server as a chat message (over TLS)
                 client->verify_command(&input_buffer, sockfd);
             }
 

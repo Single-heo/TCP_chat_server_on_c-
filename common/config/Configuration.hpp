@@ -6,13 +6,15 @@
 
 // Holds every runtime setting parsed from the .ini config file.
 struct ServerConfig {
-    std::string address;       // Bind/listen IP address
-    std::string LogPath;       // Destination file for log output
-    std::string DatabasePath;  // Path to the credentials JSON store
-    std::string PidFilePath;   // PID file path (daemon tracking)
-    int port;                  // Listen port
-    int maxConnections;        // listen() backlog / global cap
-    int timeout;               // Connection idle timeout (seconds)
+    std::string address;             // Bind/listen IP address
+    std::string LogPath;             // Destination file for log output
+    std::string DatabasePath;        // Path to the credentials JSON store
+    std::string PidFilePath;         // PID file path (daemon tracking)
+    std::string CertificateFile;     // Certificate File Path
+    std::string PrivateKeyFile;      // Private Key File Path
+    int port;                        // Listen port
+    int maxConnections;              // listen() backlog / global cap
+    int timeout;                     // Connection idle timeout (seconds)
     bool Run_without_logging{false}; // true → skip file logging (journald only)
 
     // Parses `file`; returns false if the .ini can't be loaded.
@@ -48,6 +50,14 @@ struct ServerConfig {
         PidFilePath =
             ini.GetValue("PID", "PidFilePath", "/run/tcpserver/server.pid");
 
+        // ---- [TLS_Files] ---- 
+        CertificateFile =
+            ini.GetValue("TLS_Files", "CertificateFile", "/etc/tcpserver/tls_files/server.cert");
+
+        // ---- [TLS_Files]
+        PrivateKeyFile = 
+            ini.GetValue("TLS_Files", "PrivateKeyFile" , "/etc/tcpserver/tls_files/server.privkey");
+  
         // ---- [LOGS] toggle ----
         Run_without_logging =
             (bool)ini.GetBoolValue("LOGS", "Run_Without_logging", false);
