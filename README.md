@@ -305,7 +305,6 @@ To remove everything, including configuration, logs, database and the dedicated 
 
 # Current Limitations
 
-* No TLS/SSL encryption
 * Single-threaded architecture
 * No message history
 * No offline messaging
