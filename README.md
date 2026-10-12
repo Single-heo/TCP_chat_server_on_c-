@@ -312,7 +312,6 @@ To remove everything, including configuration, logs, database and the dedicated 
 
 # Planned Features
 
-* TLS support
 * Private messaging
 * Chat rooms
 * Message history
@@ -344,7 +343,8 @@ This project was developed to gain practical experience with:
 
 # License
 
-This project is open source and intended primarily for educational purposes.
+This project is open source and intended primarily for educational purposes. 
+Anyone can use this as base for another project, but for legal purposes obviously
 
 ---
 
@@ -352,5 +352,5 @@ This project is open source and intended primarily for educational purposes.
 
 **Heitor Zanin Mello**
 
-Learning project focused on Linux systems programming, networking, secure authentication, and service-oriented application development.
-Demonstration of skills and capabilities.
+Learning project focused on Linux systems programming, networking, secure authentication, and service-oriented application development, designed for Systems Engineers.
+Demonstration of Skills and Capabilities.
